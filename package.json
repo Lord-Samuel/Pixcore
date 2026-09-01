@@ -1,0 +1,33 @@
+{
+  "name": "pixcore",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Lightweight buffer-in/buffer-out image processing",
+  "keywords": [
+    "Processing",
+    "Jpeg",
+    "jpg",
+    "Webp"
+  ],
+  "homepage": "https://github.com/Lord-Samuel/Pixcore#readme",
+  "bugs": {
+    "url": "https://github.com/Lord-Samuel/Pixcore/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lord-Samuel/Pixcore.git"
+  },
+  "license": "MIT",
+  "author": "Samuel Rebix",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/test.js"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0"
+  },
+  "optionalDependencies": {
+    "@jsquash/webp": "^1.5.0"
+  }
+}
