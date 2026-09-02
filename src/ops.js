@@ -13,6 +13,54 @@ function crop({ data, width, height }, x, y, w, h) {
     return { data: out, width: w, height: h };
 }
 
+/** Average a 2x2 block down to 1 pixel — used as a pre-filtering step before
+ *  bilinear resize so shrinking doesn't alias/skip source detail. */
+function downsampleBy2({ data, width, height }) {
+    const newW = Math.max(1, Math.floor(width / 2));
+    const newH = Math.max(1, Math.floor(height / 2));
+    const out = new Uint8Array(newW * newH * 4);
+    for (let y = 0; y < newH; y++) {
+        const srcY = y * 2;
+        const outRowBase = y * newW * 4;
+        for (let x = 0; x < newW; x++) {
+            const srcX = x * 2;
+            let r = 0, g = 0, b = 0, a = 0, count = 0;
+            for (let dy = 0; dy < 2; dy++) {
+                const sy = srcY + dy;
+                if (sy >= height) continue;
+                const rowBase = sy * width;
+                for (let dx = 0; dx < 2; dx++) {
+                    const sx = srcX + dx;
+                    if (sx >= width) continue;
+                    const idx = (rowBase + sx) * 4;
+                    r += data[idx]; g += data[idx + 1]; b += data[idx + 2]; a += data[idx + 3];
+                    count++;
+                }
+            }
+            const outIdx = outRowBase + x * 4;
+            out[outIdx] = Math.round(r / count);
+            out[outIdx + 1] = Math.round(g / count);
+            out[outIdx + 2] = Math.round(b / count);
+            out[outIdx + 3] = Math.round(a / count);
+        }
+    }
+    return { data: out, width: newW, height: newH };
+}
+
+/** Quality-preserving resize: for significant downscales, repeatedly box-average
+ *   2x2 blocks until close to the target size (folding in all source detail,
+ *  like mipmap minification) before the final bilinear pass. For upscales or
+ *  mild downscales this degrades to a single resizeBilinear call. */
+function resizeSmooth(img, targetW, targetH) {
+    targetW = Math.max(1, Math.round(targetW));
+    targetH = Math.max(1, Math.round(targetH));
+    let current = img;
+    while (current.width >= targetW * 2 && current.height >= targetH * 2) {
+        current = downsampleBy2(current);
+    }
+    return resizeBilinear(current, targetW, targetH);
+}
+
 function resizeBilinear({ data, width, height }, targetW, targetH) {
     targetW = Math.max(1, Math.round(targetW));
     targetH = Math.max(1, Math.round(targetH));
@@ -25,24 +73,36 @@ function resizeBilinear({ data, width, height }, targetW, targetH) {
         const y0 = Math.floor(srcY);
         const y1 = Math.min(y0 + 1, height - 1);
         const yFrac = srcY - y0;
+        const yFracInv = 1 - yFrac;
+        const row0 = y0 * width;
+        const row1 = y1 * width;
+        const outRowBase = ty * targetW * 4;
 
         for (let tx = 0; tx < targetW; tx++) {
             const srcX = tx * xRatio;
             const x0 = Math.floor(srcX);
             const x1 = Math.min(x0 + 1, width - 1);
             const xFrac = srcX - x0;
+            const xFracInv = 1 - xFrac;
 
-            const i00 = (y0 * width + x0) * 4;
-            const i10 = (y0 * width + x1) * 4;
-            const i01 = (y1 * width + x0) * 4;
-            const i11 = (y1 * width + x1) * 4;
-            const outIdx = (ty * targetW + tx) * 4;
+            const i00 = (row0 + x0) * 4;
+            const i10 = (row0 + x1) * 4;
+            const i01 = (row1 + x0) * 4;
+            const i11 = (row1 + x1) * 4;
+            const outIdx = outRowBase + tx * 4;
 
-            for (let c = 0; c < 4; c++) {
-                const top = data[i00 + c] * (1 - xFrac) + data[i10 + c] * xFrac;
-                const bottom = data[i01 + c] * (1 - xFrac) + data[i11 + c] * xFrac;
-                out[outIdx + c] = Math.round(top * (1 - yFrac) + bottom * yFrac);
-            }
+            out[outIdx] = Math.round(
+                (data[i00] * xFracInv + data[i10] * xFrac) * yFracInv +
+                (data[i01] * xFracInv + data[i11] * xFrac) * yFrac);
+            out[outIdx + 1] = Math.round(
+                (data[i00 + 1] * xFracInv + data[i10 + 1] * xFrac) * yFracInv +
+                (data[i01 + 1] * xFracInv + data[i11 + 1] * xFrac) * yFrac);
+            out[outIdx + 2] = Math.round(
+                (data[i00 + 2] * xFracInv + data[i10 + 2] * xFrac) * yFracInv +
+                (data[i01 + 2] * xFracInv + data[i11 + 2] * xFrac) * yFrac);
+            out[outIdx + 3] = Math.round(
+                (data[i00 + 3] * xFracInv + data[i10 + 3] * xFrac) * yFracInv +
+                (data[i01 + 3] * xFracInv + data[i11 + 3] * xFrac) * yFrac);
         }
     }
     return { data: out, width: targetW, height: targetH };
@@ -50,10 +110,15 @@ function resizeBilinear({ data, width, height }, targetW, targetH) {
 
 /** cover: fill box, crop overflow */
 function resizeCover(img, targetW, targetH) {
+    targetW = Math.max(1, Math.round(targetW));
+    targetH = Math.max(1, Math.round(targetH));
     const scale = Math.max(targetW / img.width, targetH / img.height);
-    const scaledW = Math.round(img.width * scale);
-    const scaledH = Math.round(img.height * scale);
-    const scaled = resizeBilinear(img, scaledW, scaledH);
+    // Round up so the scaled image is never short of the target due to
+    // floating-point rounding (crop() would otherwise silently clamp the
+    // output to a smaller-than-requested size).
+    const scaledW = Math.max(targetW, Math.ceil(img.width * scale));
+    const scaledH = Math.max(targetH, Math.ceil(img.height * scale));
+    const scaled = resizeSmooth(img, scaledW, scaledH);
     const cropX = Math.floor((scaledW - targetW) / 2);
     const cropY = Math.floor((scaledH - targetH) / 2);
     return crop(scaled, cropX, cropY, targetW, targetH);
@@ -62,7 +127,7 @@ function resizeCover(img, targetW, targetH) {
 /** contain: fit inside box, no crop */
 function resizeContain({ data, width, height }, targetW, targetH) {
     const scale = Math.min(targetW / width, targetH / height);
-    return resizeBilinear({ data, width, height }, width * scale, height * scale);
+    return resizeSmooth({ data, width, height }, width * scale, height * scale);
 }
 
 function grayscale({ data, width, height }) {
@@ -390,9 +455,12 @@ function trim({ data, width, height }, { threshold = 10, background } = {}) {
     return crop({ data, width, height }, left, top, right - left + 1, bottom - top + 1);
 }
 
-/** overlay with proper alpha blending */
+/** overlay with proper alpha blending. Mutates `base.data` in place — safe because
+ *  callers (PixCore.composite) always replace their reference with the result and
+ *  never read the pre-composite buffer afterward; avoids an O(width*height) copy
+ *  per layer when compositing several layers in sequence. */
 function composite(base, overlayImg, { left = 0, top = 0 } = {}) {
-    const out = new Uint8Array(base.data);
+    const out = base.data;
     for (let row = 0; row < overlayImg.height; row++) {
         const dstRow = row + top;
         if (dstRow < 0 || dstRow >= base.height) continue;
@@ -453,7 +521,7 @@ function computeStats({ data }) {
 }
 
 export {
-    crop, resizeBilinear, resizeCover, resizeContain,
+    crop, resizeBilinear, resizeSmooth, resizeCover, resizeContain,
     grayscale, flip, flop, rotate90,
     negate, normalize, tint, blur, sharpen, extend, trim, composite,
     ensureAlpha, removeAlpha, detectAlphaUsage, computeStats
