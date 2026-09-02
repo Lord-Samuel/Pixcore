@@ -2,6 +2,7 @@ import { decode } from './src/decode.js'
 import * as ops from './src/ops.js'
 import * as encode from './src/encode.js'
 import { writeExif } from './src/exif.js'
+import { createCanvas } from './src/canvas.js'
 
 class PixCore {
     constructor(img) {
@@ -9,6 +10,11 @@ class PixCore {
         this._originalFormat = img.format
         this._originalSize = img.originalSize
         this._targetFormat = null
+    }
+
+    /** Wrap a canvas (from createCanvas) so it can go through resize/composite/toBuffer etc. */
+    static fromCanvas(canvas) {
+        return new PixCore(canvas.toImage())
     }
 
     metadata() {
@@ -34,7 +40,7 @@ class PixCore {
 
         if (fit === 'cover') this._img = ops.resizeCover(this._img, width, height)
         else if (fit === 'contain') this._img = ops.resizeContain(this._img, width, height)
-        else this._img = ops.resizeBilinear(this._img, width, height)
+        else this._img = ops.resizeSmooth(this._img, width, height)
         return this
     }
 
@@ -56,12 +62,12 @@ class PixCore {
     }
 
     async composite(layers = []) {
-        for (const layer of layers) {
-            const overlayImg = Buffer.isBuffer(layer.input)
-                ? await decode(layer.input)
-                : layer.input
-            this._img = ops.composite(this._img, overlayImg, { left: layer.left || 0, top: layer.top || 0 })
-        }
+        const overlayImgs = await Promise.all(layers.map(layer =>
+            Buffer.isBuffer(layer.input) ? decode(layer.input) : layer.input
+        ))
+        layers.forEach((layer, i) => {
+            this._img = ops.composite(this._img, overlayImgs[i], { left: layer.left || 0, top: layer.top || 0 })
+        })
         return this
     }
 
@@ -98,7 +104,7 @@ class PixCore {
         const format = resolved.format || 'jpeg'
         
         if (format === 'webp') {
-            const buffer = await encode.toWebp(this._img, resolved.quality || 80)
+            const buffer = await encode.toWebp(this._img, resolved.quality ?? 80)
             if (resolved.exif) {
                 const { width, height } = this.metadata()
                 return writeExif(buffer, { width, height }, resolved.exif)
@@ -107,7 +113,7 @@ class PixCore {
         }
         
         if (format === 'png') return encode.toPng(this._img)
-        return encode.toJpeg(this._img, resolved.quality || 80)
+        return encode.toJpeg(this._img, resolved.quality ?? 80)
     }
 }
 
@@ -116,4 +122,4 @@ async function read(buffer) {
     return new PixCore(decoded)
 }
 
-export { read, PixCore }
+export { read, PixCore, createCanvas }
