@@ -2,8 +2,6 @@
 
 Lightweight, buffer-in / buffer-out image processing and canvas creation for Node.js — no native dependencies, no compilation step.
 
-Built and tested for use with [Bail-Lite](https://github.com/Lord-Samuel/Bail-lite) — it includes a WhatsApp-sticker EXIF writer out of the box.
-
 ---
 
 ## Install
