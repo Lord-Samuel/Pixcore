@@ -25,9 +25,9 @@ const out = await img
     .toBuffer({ format: 'jpeg', quality: 85 })
 ```
 
-## API
+# API
 
-### `read(buffer)`
+## `read(buffer)`
 
 Decodes a PNG, JPEG, or WebP buffer and returns a `PixCore` instance. Format
 is auto-detected from the buffer's magic bytes — you never need to specify it.
@@ -36,7 +36,7 @@ is auto-detected from the buffer's magic bytes — you never need to specify it.
 const img = await read(buffer)
 ```
 
-### `.metadata()`
+## `.metadata()`
 
 Returns metadata for the image as currently loaded (source format, current
 dimensions, alpha usage, original file size).
@@ -54,7 +54,7 @@ img.metadata()
 // }
 ```
 
-### `.stats()` *(async)*
+## `.stats()` *(async)*
 
 Basic per-channel mean values.
 
@@ -63,7 +63,7 @@ await img.stats()
 // { channels: [{ mean }, { mean }, { mean }, { mean }] }  // R, G, B, A
 ```
 
-### `.resize(width, height, { fit })`
+## `.resize(width, height, { fit })`
 
 Resize the image. Omit either dimension to preserve aspect ratio.
 
@@ -76,7 +76,7 @@ img.resize(300, 300, { fit: 'cover' })
 img.resize(300) // height auto-computed from aspect ratio
 ```
 
-### `.extract({ left, top, width, height })`
+## `.extract({ left, top, width, height })`
 
 Crop to a rectangle. `width`/`height` default to the remaining image extent
 from `left`/`top` if omitted.
@@ -85,7 +85,7 @@ from `left`/`top` if omitted.
 img.extract({ left: 10, top: 10, width: 200, height: 200 })
 ```
 
-### `.extend({ top, bottom, left, right, background })`
+## `.extend({ top, bottom, left, right, background })`
 
 Pad the canvas. `background` is `[r, g, b, a]`.
 
@@ -93,7 +93,7 @@ Pad the canvas. `background` is `[r, g, b, a]`.
 img.extend({ top: 20, bottom: 20, left: 20, right: 20, background: [255, 255, 255, 255] })
 ```
 
-### `.trim({ threshold, background })`
+## `.trim({ threshold, background })`
 
 Trim uniform borders. If `background` is omitted, it's auto-detected from the
 top-left corner pixel (matching the common case of a solid-colored border).
@@ -105,7 +105,7 @@ img.trim()
 img.trim({ threshold: 5, background: [255, 255, 255, 255] })
 ```
 
-### `.composite(layers)` *(async)*
+## `.composite(layers)` *(async)*
 
 Alpha-blend one or more overlay images onto the current image.
 
@@ -118,19 +118,19 @@ await img.composite([
 `input` can be a `Buffer` (decoded automatically) or an already-decoded
 `{ data, width, height }` object.
 
-### `.grayscale()` / `.greyscale()`
+## `.grayscale()` / `.greyscale()`
 
 Convert to grayscale (luminance-weighted).
 
-### `.negate()`
+## `.negate()`
 
 Invert RGB channels.
 
-### `.normalize()` / `.normalise()`
+## `.normalize()` / `.normalise()`
 
 Stretch contrast to use the full 0–255 range per channel.
 
-### `.tint([r, g, b])`
+## `.tint([r, g, b])`
 
 Multiply each channel toward a target color.
 
@@ -138,28 +138,28 @@ Multiply each channel toward a target color.
 img.tint([255, 200, 150]) // warm tint
 ```
 
-### `.blur(radius = 2)`
+## `.blur(radius = 2)`
 
 Separable box blur.
 
-### `.sharpen(amount = 1)`
+## `.sharpen(amount = 1)`
 
 3×3 Laplacian-style sharpen.
 
-### `.flip()` / `.flop()`
+## `.flip()` / `.flop()`
 
 Vertical / horizontal mirror.
 
-### `.rotate(degrees = 90)`
+## `.rotate(degrees = 90)`
 
 Rotate by a multiple of 90° (90, 180, 270, or negative equivalents).
 
-### `.ensureAlpha()` / `.removeAlpha()`
+## `.ensureAlpha()` / `.removeAlpha()`
 
 `removeAlpha()` flattens the alpha channel to fully opaque. Internal pixel
 format is always RGBA, so `ensureAlpha()` is a no-op kept for API parity.
 
-### `.jpeg(opts)` / `.png(opts)` / `.webp(opts)`
+## `.jpeg(opts)` / `.png(opts)` / `.webp(opts)`
 
 Set the output format and its options ahead of `.toBuffer()`. Purely a
 convenience — equivalent to passing the same options directly to
@@ -170,7 +170,7 @@ img.jpeg({ quality: 90 })
 img.webp({ quality: 80, exif: { packname: 'My Pack', author: 'Me' } })
 ```
 
-### `.toBuffer(opts)` *(async)*
+## `.toBuffer(opts)` *(async)*
 
 Encodes the current pipeline state and returns a `Buffer`.
 
@@ -182,7 +182,7 @@ await img.toBuffer({ format: 'webp', quality: 80 })
 
 Defaults to `jpeg` at quality `80` if no format was set via `.jpeg()`/`.png()`/`.webp()`.
 
-#### webp metadata encoding 
+### webp metadata encoding 
 
 When encoding to WebP, passing `exif` embeds metadata (pack name, author, emoji categories) directly into the output..
 
