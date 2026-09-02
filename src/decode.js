@@ -1,12 +1,29 @@
 import { PNG } from 'pngjs'
 import jpeg from 'jpeg-js'
+import { createRequire } from 'module'
+import { readFileSync } from 'fs'
+
+const require = createRequire(import.meta.url)
 
 let webpDecodeFn;
+let webpInitialized = false;
+
 async function getWebpDecoder() {
     if (webpDecodeFn === undefined) {
         try {
-            const mod = await import('@jsquash/webp/decode');
+            const mod = await import('@jsquash/webp/decode.js');
             webpDecodeFn = mod.default;
+            
+            if (!webpInitialized && webpDecodeFn) {
+                const wasmPath = require.resolve('@jsquash/webp/codec/dec/webp_dec.wasm')
+                const wasmBuffer = readFileSync(wasmPath)
+                const wasmModule = new WebAssembly.Module(wasmBuffer)
+        
+                if (mod.init) {
+                    await mod.init(wasmModule)
+                    webpInitialized = true
+                }
+            }
         }
         catch {
             webpDecodeFn = null;
