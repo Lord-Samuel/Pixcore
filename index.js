@@ -33,13 +33,13 @@ class PixCore {
         return ops.computeStats(this._img)
     }
 
-    resize(width, height, { fit = 'fill' } = {}) {
+    resize(width, height, { fit = 'fill', background } = {}) {
         if (!width && !height) return this
         if (!height) height = Math.round(this._img.height * (width / this._img.width))
         if (!width) width = Math.round(this._img.width * (height / this._img.height))
 
         if (fit === 'cover') this._img = ops.resizeCover(this._img, width, height)
-        else if (fit === 'contain') this._img = ops.resizeContain(this._img, width, height)
+        else if (fit === 'contain') this._img = ops.resizeContain(this._img, width, height, { background })
         else this._img = ops.resizeSmooth(this._img, width, height)
         return this
     }
