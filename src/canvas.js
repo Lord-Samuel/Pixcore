@@ -70,7 +70,77 @@ function ellipseCommands(cx, cy, rx, ry) {
     ]
 }
 
-/** Scale a set of contours outward from their own bounding-box center, for a cheap stroke effect. */
+/** Normalize/sort gradient stops, parsing each color and clamping offsets to [0,1]. */
+function normalizeStops(stops) {
+    const parsed = stops
+        .map(s => ({ ...parseColor(s.color), offset: Math.max(0, Math.min(1, s.offset)) }))
+        .sort((a, b) => a.offset - b.offset)
+    if (parsed.length === 0) {
+        parsed.push({ r: 0, g: 0, b: 0, a: 1, offset: 0 })
+        parsed.push({ r: 255, g: 255, b: 255, a: 1, offset: 1 })
+    }
+    return parsed
+}
+
+function sampleGradientAt(t, stops) {
+    if (t <= stops[0].offset) return stops[0]
+    if (t >= stops[stops.length - 1].offset) return stops[stops.length - 1]
+    for (let i = 0; i < stops.length - 1; i++) {
+        const s0 = stops[i], s1 = stops[i + 1]
+        if (t >= s0.offset && t <= s1.offset) {
+            const localT = (t - s0.offset) / (s1.offset - s0.offset)
+            return {
+                r: Math.round(s0.r + (s1.r - s0.r) * localT),
+                g: Math.round(s0.g + (s1.g - s0.g) * localT),
+                b: Math.round(s0.b + (s1.b - s0.b) * localT),
+                a: s0.a + (s1.a - s0.a) * localT
+            }
+        }
+    }
+    return stops[stops.length - 1]
+}
+
+/** Precompute a fixed-resolution color ramp from gradient stops, once per fill. */
+function buildGradientRamp(stops, steps = 256) {
+    const ramp = new Array(steps + 1)
+    for (let i = 0; i <= steps; i++) ramp[i] = sampleGradientAt(i / steps, stops)
+    return ramp
+}
+
+function sampleRamp(ramp, t) {
+    const clamped = t < 0 ? 0 : t > 1 ? 1 : t
+    return ramp[Math.round(clamped * (ramp.length - 1))]
+}
+
+/**
+ * Build a (x,y) => {r,g,b,a} sampler function from a gradient descriptor.
+ * canvasWidth/canvasHeight are only used as fallback defaults for `to` when
+ * the caller doesn't specify one explicitly (matches whole-canvas gradient()).
+ */
+function makeGradientSampler({ type = 'linear', from = { x: 0, y: 0 }, to, stops = [] }, canvasWidth, canvasHeight) {
+    const ramp = buildGradientRamp(normalizeStops(stops))
+
+    if (type === 'radial') {
+        const radius = typeof to === 'number' ? to : Math.max(canvasWidth, canvasHeight) / 2
+        return (x, y) => {
+            const dist = Math.hypot(x - from.x, y - from.y)
+            const t = radius > 0 ? dist / radius : 0
+            return sampleRamp(ramp, t)
+        }
+    }
+
+    const target = to && typeof to === 'object' ? to : { x: canvasWidth, y: canvasHeight }
+    const dx = target.x - from.x, dy = target.y - from.y
+    const lengthSq = dx * dx + dy * dy
+    return (x, y) => {
+        const t = lengthSq > 0 ? ((x - from.x) * dx + (y - from.y) * dy) / lengthSq : 0
+        return sampleRamp(ramp, t)
+    }
+}
+
+function isGradientDescriptor(input) {
+    return input && typeof input === 'object' && (input.type === 'linear' || input.type === 'radial')
+}
 function offsetContours(contours, amount) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const ring of contours) for (const p of ring) {
@@ -105,17 +175,30 @@ class Canvas {
         }
     }
 
-    _fillContours(contours, colorInput) {
-        const color = parseColor(colorInput)
-        fillContours(this.data, this.width, this.height, contours, color)
+    /**
+     * fill: either a CSS-style color string/object, OR a gradient descriptor
+     * { type: 'linear'|'radial', from, to, stops } to clip a gradient to
+     * this shape's contours.
+     */
+    _fillContours(contours, fillInput) {
+        if (isGradientDescriptor(fillInput)) {
+            const sampler = makeGradientSampler(fillInput, this.width, this.height)
+            fillContours(this.data, this.width, this.height, contours, sampler)
+        } else {
+            const color = parseColor(fillInput)
+            fillContours(this.data, this.width, this.height, contours, color)
+        }
     }
 
     rect({ x, y, width, height, radius = 0, fill, stroke, strokeWidth = 1 }) {
         const contours = commandsToContours(rectCommands(x, y, width, height, radius))
         if (stroke) {
-            const so = strokeWidth / 2
+            // Expanded by the FULL strokeWidth, not half: the fill drawn on top
+            // (below) covers everything up to the original edge, so the visible
+            // ring is exactly [edge, edge+strokeWidth] — the stroke sits just
+            // outside the shape rather than being centered on its path.
             const strokeContours = commandsToContours(
-                rectCommands(x - so, y - so, width + so * 2, height + so * 2, radius + so)
+                rectCommands(x - strokeWidth, y - strokeWidth, width + strokeWidth * 2, height + strokeWidth * 2, radius + strokeWidth)
             )
             this._fillContours(strokeContours, stroke)
         }
@@ -130,8 +213,8 @@ class Canvas {
     ellipse({ x, y, rx, ry, fill, stroke, strokeWidth = 1 }) {
         const contours = commandsToContours(ellipseCommands(x, y, rx, ry))
         if (stroke) {
-            const so = strokeWidth / 2
-            const strokeContours = commandsToContours(ellipseCommands(x, y, rx + so, ry + so))
+            // See rect() above: full strokeWidth expansion, stroke sits outside the shape.
+            const strokeContours = commandsToContours(ellipseCommands(x, y, rx + strokeWidth, ry + strokeWidth))
             this._fillContours(strokeContours, stroke)
         }
         if (fill) this._fillContours(contours, fill)
@@ -166,114 +249,46 @@ class Canvas {
 
     /**
      * gradient({ type: 'linear'|'radial', from, to, stops })
+     * Paints the gradient across the entire canvas, overwriting existing
+     * content (this does not blend with or clip to prior drawing — call it
+     * first, as a background, or use a gradient descriptor as a shape's
+     * `fill` instead to clip a gradient to that shape).
      */
-    gradient({ type = 'linear', from = { x: 0, y: 0 }, to = { x: this.width, y: this.height }, stops = [] }) {
-        const gradientStops = stops.map(s => ({
-            ...parseColor(s.color),
-            offset: Math.max(0, Math.min(1, s.offset))
-        })).sort((a, b) => a.offset - b.offset)
-
-        if (gradientStops.length === 0) {
-            gradientStops.push({ r: 0, g: 0, b: 0, a: 1, offset: 0 })
-            gradientStops.push({ r: 255, g: 255, b: 255, a: 1, offset: 1 })
-        }
-
-        if (type === 'radial') {
-            const radius = typeof to === 'number' ? to : Math.max(this.width, this.height) / 2
-            this._fillRadialGradient(from, radius, gradientStops)
-        } else {
-            this._fillLinearGradient(from, to, gradientStops)
+    gradient({ type = 'linear', from = { x: 0, y: 0 }, to, stops = [] } = {}) {
+        const sampler = makeGradientSampler({ type, from, to, stops }, this.width, this.height)
+        for (let y = 0; y < this.height; y++) {
+            for (let x = 0; x < this.width; x++) {
+                const color = sampler(x, y)
+                const idx = (y * this.width + x) * 4
+                this.data[idx] = color.r
+                this.data[idx + 1] = color.g
+                this.data[idx + 2] = color.b
+                this.data[idx + 3] = Math.round(color.a * 255)
+            }
         }
         return this
     }
 
-    _fillLinearGradient(from, to, stops) {
-        const dx = to.x - from.x
-        const dy = to.y - from.y
-        const lengthSq = dx * dx + dy * dy
-        const ramp = this._buildGradientRamp(stops)
-
-        for (let y = 0; y < this.height; y++) {
-            for (let x = 0; x < this.width; x++) {
-                const t = lengthSq > 0 ? ((x - from.x) * dx + (y - from.y) * dy) / lengthSq : 0
-                const color = this._sampleRamp(ramp, t)
-                const idx = (y * this.width + x) * 4
-                this.data[idx] = color.r
-                this.data[idx + 1] = color.g
-                this.data[idx + 2] = color.b
-                this.data[idx + 3] = Math.round(color.a * 255)
-            }
-        }
-    }
-
-    _fillRadialGradient(center, radius, stops) {
-        const maxDist = radius || Math.max(this.width, this.height) / 2
-        const ramp = this._buildGradientRamp(stops)
-        for (let y = 0; y < this.height; y++) {
-            for (let x = 0; x < this.width; x++) {
-                const dist = Math.sqrt((x - center.x) ** 2 + (y - center.y) ** 2)
-                const t = Math.max(0, Math.min(1, dist / maxDist))
-                const color = this._sampleRamp(ramp, t)
-                const idx = (y * this.width + x) * 4
-                this.data[idx] = color.r
-                this.data[idx + 1] = color.g
-                this.data[idx + 2] = color.b
-                this.data[idx + 3] = Math.round(color.a * 255)
-            }
-        }
-    }
-
-    /** Precompute a fixed-resolution color ramp from gradient stops, once per gradient() call. */
-    _buildGradientRamp(stops, steps = 256) {
-        const ramp = new Array(steps + 1)
-        for (let i = 0; i <= steps; i++) {
-            ramp[i] = this._sampleGradient(i / steps, stops)
-        }
-        return ramp
-    }
-
-    _sampleRamp(ramp, t) {
-        const clamped = t < 0 ? 0 : t > 1 ? 1 : t
-        return ramp[Math.round(clamped * (ramp.length - 1))]
-    }
-
-    _sampleGradient(t, stops) {
-        if (t <= stops[0].offset) return stops[0]
-        if (t >= stops[stops.length - 1].offset) return stops[stops.length - 1]
-
-        for (let i = 0; i < stops.length - 1; i++) {
-            const s0 = stops[i]
-            const s1 = stops[i + 1]
-            if (t >= s0.offset && t <= s1.offset) {
-                const localT = (t - s0.offset) / (s1.offset - s0.offset)
-                return {
-                    r: Math.round(s0.r + (s1.r - s0.r) * localT),
-                    g: Math.round(s0.g + (s1.g - s0.g) * localT),
-                    b: Math.round(s0.b + (s1.b - s0.b) * localT),
-                    a: s0.a + (s1.a - s0.a) * localT
-                }
-            }
-        }
-        return stops[stops.length - 1]
-    }
-
     /** line({ x1, y1, x2, y2, color, width = 1 }) */
     line({ x1, y1, x2, y2, color, width = 1 }) {
-        const strokeColor = parseColor(color)
-        const steps = Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1), 1)
-        const dx = (x2 - x1) / steps
-        const dy = (y2 - y1) / steps
+        const dx = x2 - x1, dy = y2 - y1
+        const len = Math.hypot(dx, dy)
+        // Perpendicular unit vector, scaled to half the stroke width.
+        const half = width / 2
+        const nx = len > 0 ? (-dy / len) * half : half
+        const ny = len > 0 ? (dx / len) * half : 0
 
-        for (let i = 0; i <= steps; i++) {
-            const x = Math.round(x1 + dx * i)
-            const y = Math.round(y1 + dy * i)
-            
-            if (width <= 1) {
-                this._setPixel(x, y, strokeColor)
-            } else {
-                this.circle({ x, y, radius: width / 2, fill: color })
-            }
-        }
+        // A single quad along the line, filled once — correct alpha (no
+        // compounding from overlapping stamps) and O(line area) instead of
+        // O(length) circle fills.
+        const commands = [
+            { type: 'M', x: x1 + nx, y: y1 + ny },
+            { type: 'L', x: x2 + nx, y: y2 + ny },
+            { type: 'L', x: x2 - nx, y: y2 - ny },
+            { type: 'L', x: x1 - nx, y: y1 - ny },
+            { type: 'Z' }
+        ]
+        this._fillContours(commandsToContours(commands), color)
         return this
     }
 
@@ -287,25 +302,28 @@ class Canvas {
 
     /** arc({ x, y, radius, startAngle, endAngle, fill, stroke, strokeWidth }) */
     arc({ x, y, radius, startAngle = 0, endAngle = Math.PI * 2, fill, stroke, strokeWidth = 1 }) {
+        const sweep = Math.abs(endAngle - startAngle)
+        const isFullCircle = sweep >= Math.PI * 2 - 1e-9
+        const segments = Math.max(8, Math.floor(sweep * 16))
         const commands = []
-        const segments = Math.max(8, Math.floor((endAngle - startAngle) * 16))
-        
-        commands.push({
-            type: 'M',
-            x: x + radius * Math.cos(startAngle),
-            y: y + radius * Math.sin(startAngle)
-        })
+
+        // Partial arcs get a pie-wedge shape (path through the center, like a
+        // clock hand sweep) — the usual meaning of a filled arc (pac-man,
+        // progress rings). A full circle skips the center: adding a line to
+        // it and back would just be a zero-area slit at the seam.
+        if (!isFullCircle) {
+            commands.push({ type: 'M', x, y })
+            commands.push({ type: 'L', x: x + radius * Math.cos(startAngle), y: y + radius * Math.sin(startAngle) })
+        } else {
+            commands.push({ type: 'M', x: x + radius * Math.cos(startAngle), y: y + radius * Math.sin(startAngle) })
+        }
 
         for (let i = 1; i <= segments; i++) {
             const angle = startAngle + (endAngle - startAngle) * (i / segments)
-            commands.push({
-                type: 'L',
-                x: x + radius * Math.cos(angle),
-                y: y + radius * Math.sin(angle)
-            })
+            commands.push({ type: 'L', x: x + radius * Math.cos(angle), y: y + radius * Math.sin(angle) })
         }
 
-        commands.push({ type: 'Z' })
+        commands.push({ type: 'Z' }) // for the wedge case, this closes straight back to center
 
         const contours = commandsToContours(commands)
         if (stroke) this._fillContours(offsetContours(contours, strokeWidth / 2), stroke)
