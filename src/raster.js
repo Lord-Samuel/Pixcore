@@ -90,8 +90,13 @@ function commandsToContours(commands) {
  * opposite directions — correctly renders as a ring with a hole).
  * color: {r,g,b,a} with a in [0,1]. Blends via standard "source over".
  */
+/**
+ * color may be a solid {r,g,b,a} object, or a sampler function (x,y) => {r,g,b,a}
+ * for non-uniform fills (gradients) clipped to the same contours/AA as a solid fill.
+ */
 function fillContours(buffer, width, height, contours, color) {
-    if (!contours.length || color.a <= 0) return
+    const isSampler = typeof color === 'function'
+    if (!contours.length || (!isSampler && color.a <= 0)) return
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const ring of contours) {
@@ -166,7 +171,9 @@ function fillContours(buffer, width, height, contours, color) {
         for (let x = xStart; x <= xEnd; x++) {
             const coverage = coverageBuffer[rowBase + (x - xStart)]
             if (coverage <= 0) continue
-            blendPixel(buffer, width, x, y, color, coverage)
+            const pixelColor = isSampler ? color(x, y) : color
+            if (pixelColor.a <= 0) continue
+            blendPixel(buffer, width, x, y, pixelColor, coverage)
         }
     }
 }
