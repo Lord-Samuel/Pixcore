@@ -184,15 +184,35 @@ function flip({ data, width, height }) {
 }
 
 function flop({ data, width, height }) {
-    // Uint32 view: one read/write per pixel instead of four.
     const out = new Uint8Array(data.length);
-    const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
-    const dst32 = new Uint32Array(out.buffer);
+
+    // Uint32 view: one read/write per pixel instead of four. Requires
+    // data.byteOffset to be a multiple of 4 — true for every buffer this
+    // library produces internally (always freshly allocated), but not
+    // guaranteed for a buffer a caller constructs and passes in directly
+    // (PixCore is exported with no input validation), so fall back safely.
+    if (data.byteOffset % 4 === 0) {
+        const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
+        const dst32 = new Uint32Array(out.buffer);
+        for (let row = 0; row < height; row++) {
+            let s = row * width;
+            let d = s + width - 1;
+            for (let col = 0; col < width; col++) {
+                dst32[d - col] = src32[s + col];
+            }
+        }
+        return { data: out, width, height };
+    }
+
     for (let row = 0; row < height; row++) {
-        let s = row * width;
-        let d = s + width - 1;
+        const rowBase = row * width;
         for (let col = 0; col < width; col++) {
-            dst32[d - col] = src32[s + col];
+            const srcIdx = (rowBase + col) * 4;
+            const dstIdx = (rowBase + width - 1 - col) * 4;
+            out[dstIdx] = data[srcIdx];
+            out[dstIdx + 1] = data[srcIdx + 1];
+            out[dstIdx + 2] = data[srcIdx + 2];
+            out[dstIdx + 3] = data[srcIdx + 3];
         }
     }
     return { data: out, width, height };
@@ -200,19 +220,40 @@ function flop({ data, width, height }) {
 
 /** 90deg clockwise rotation */
 function rotate90({ data, width, height }) {
-    // Uint32 pixel moves (one op per pixel) with the same size-based
-    // tiled fallback for cache locality on large images.
     const out = new Uint8Array(data.length);
     const newW = height, newH = width;
-    const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
-    const dst32 = new Uint32Array(out.buffer);
 
-    if (data.length < 12_000_000) {
-        for (let row = 0; row < height; row++) {
-            const srcRowBase = row * width;
-            const dstCol = height - 1 - row;
-            for (let col = 0; col < width; col++) {
-                dst32[col * newW + dstCol] = src32[srcRowBase + col];
+    // Uint32 pixel moves (one op per pixel), with a tiled fallback for cache
+    // locality on large images. Requires data.byteOffset to be a multiple of
+    // 4 (see flop() above for why that isn't always guaranteed); falls back
+    // to an equivalent byte-wise version otherwise.
+    if (data.byteOffset % 4 === 0) {
+        const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
+        const dst32 = new Uint32Array(out.buffer);
+
+        if (data.length < 12_000_000) {
+            for (let row = 0; row < height; row++) {
+                const srcRowBase = row * width;
+                const dstCol = height - 1 - row;
+                for (let col = 0; col < width; col++) {
+                    dst32[col * newW + dstCol] = src32[srcRowBase + col];
+                }
+            }
+            return { data: out, width: newW, height: newH };
+        }
+
+        const TILE = 64;
+        for (let rowTile = 0; rowTile < height; rowTile += TILE) {
+            const rowEnd = Math.min(rowTile + TILE, height);
+            for (let colTile = 0; colTile < width; colTile += TILE) {
+                const colEnd = Math.min(colTile + TILE, width);
+                for (let row = rowTile; row < rowEnd; row++) {
+                    const srcRowBase = row * width;
+                    const dstCol = height - 1 - row;
+                    for (let col = colTile; col < colEnd; col++) {
+                        dst32[col * newW + dstCol] = src32[srcRowBase + col];
+                    }
+                }
             }
         }
         return { data: out, width: newW, height: newH };
@@ -227,7 +268,12 @@ function rotate90({ data, width, height }) {
                 const srcRowBase = row * width;
                 const dstCol = height - 1 - row;
                 for (let col = colTile; col < colEnd; col++) {
-                    dst32[col * newW + dstCol] = src32[srcRowBase + col];
+                    const srcIdx = (srcRowBase + col) * 4;
+                    const dstIdx = (col * newW + dstCol) * 4;
+                    out[dstIdx] = data[srcIdx];
+                    out[dstIdx + 1] = data[srcIdx + 1];
+                    out[dstIdx + 2] = data[srcIdx + 2];
+                    out[dstIdx + 3] = data[srcIdx + 3];
                 }
             }
         }
@@ -402,7 +448,7 @@ function extend({ data, width, height }, { top = 0, bottom = 0, left = 0, right 
     const newW = width + left + right;
     const newH = height + top + bottom;
     const out = new Uint8Array(newW * newH * 4);
-    // Fill via a Uint32 view — single native fill instead of 4 writes/pixel.
+    
     const r = background[0] || 0, g = background[1] || 0, b = background[2] || 0;
     const a = background[3] ?? 255;
     if (r || g || b || a) {
