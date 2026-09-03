@@ -2,6 +2,18 @@ import Crypto from 'crypto'
 
 const EXIF_FLAG_BIT = 0x08 // VP8X flags byte, bit 3: "has EXIF metadata"
 
+// Static TIFF header + IFD prefix. Frozen once; length at offset 14 is patched per-call.
+const EXIF_ATTR = Buffer.from([
+    0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x41, 0x57, 0x07, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x16, 0x00, 0x00, 0x00
+])
+
+const RIFF = 0x46464952 // 'RIFF' LE
+const WEBP = 0x50424557 // 'WEBP' LE
+const FOURCC_VP8X = 0x58385056 // 'VP8X' LE
+const FOURCC_EXIF = 0x46495845 // 'EXIF' LE
+
 function buildExifData(metadata) {
     if (metadata.categories !== undefined && !Array.isArray(metadata.categories)) {
         throw new Error('writeExif: metadata.categories must be an array of emoji strings')
@@ -28,85 +40,89 @@ function buildExifData(metadata) {
     return exifData
 }
 
-function buildExifPayload(metadata) {
-    const exifData = buildExifData(metadata)
-
-    const exifAttr = Buffer.from([
-        0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x41, 0x57, 0x07, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x16, 0x00, 0x00, 0x00
-    ])
-
-    const jsonBuffer = Buffer.from(JSON.stringify(exifData), 'utf-8')
-    const payload = Buffer.concat([exifAttr, jsonBuffer])
-    payload.writeUIntLE(jsonBuffer.length, 14, 4)
-    return payload
-}
-
-function makeChunk(fourcc, payload) {
-    const header = Buffer.alloc(8)
-    header.write(fourcc, 0, 4, 'ascii')
-    header.writeUInt32LE(payload.length, 4)
-    const needsPad = payload.length % 2 !== 0
-    return Buffer.concat(needsPad ? [header, payload, Buffer.alloc(1)] : [header, payload])
-}
-
-function parseChunks(webpBuffer) {
-    const chunks = []
+/** Scan chunks as offsets — no per-chunk objects, no string fourcc. Returns { vp8x, spans }. */
+function scanChunks(buf) {
+    let vp8x = -1
+    const spans = []
     let offset = 12
-    while (offset + 8 <= webpBuffer.length) {
-        const fourcc = webpBuffer.toString('ascii', offset, offset + 4)
-        const size = webpBuffer.readUInt32LE(offset + 4)
-        const paddedSize = size + (size % 2)
-        const dataStart = offset + 8
-        if (dataStart + size > webpBuffer.length) break
-        chunks.push({ fourcc, size, raw: webpBuffer.subarray(offset, dataStart + paddedSize) })
-        offset = dataStart + paddedSize
+    const len = buf.length
+    while (offset + 8 <= len) {
+        const fourcc = buf.readUInt32LE(offset)
+        const size = buf.readUInt32LE(offset + 4)
+        const paddedEnd = offset + 8 + size + (size & 1)
+        if (offset + 8 + size > len) break
+        if (fourcc === FOURCC_VP8X) {
+            vp8x = offset
+        } else if (fourcc !== FOURCC_EXIF) {
+            spans.push(offset, Math.min(paddedEnd, len))
+        }
+        offset = paddedEnd
     }
-    return chunks
+    return { vp8x, spans }
 }
 
 function writeExif(webpBuffer, { width, height }, metadata = {}) {
     if (webpBuffer.length < 12 ||
-        webpBuffer.toString('ascii', 0, 4) !== 'RIFF' ||
-        webpBuffer.toString('ascii', 8, 12) !== 'WEBP') {
+        webpBuffer.readUInt32LE(0) !== RIFF ||
+        webpBuffer.readUInt32LE(8) !== WEBP) {
         throw new Error('writeExif: input is not a valid WebP buffer')
     }
 
-    const chunks = parseChunks(webpBuffer)
-    const exifChunk = makeChunk('EXIF', buildExifPayload(metadata))
+    const { vp8x, spans } = scanChunks(webpBuffer)
 
-    let vp8xChunk
-    const rest = []
-    for (const chunk of chunks) {
-        if (chunk.fourcc === 'EXIF') continue
-        if (chunk.fourcc === 'VP8X') { vp8xChunk = chunk; continue }
-        rest.push(chunk)
+    if (vp8x === -1 && (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1)) {
+        throw new Error('writeExif: width/height required to synthesize VP8X for a simple-format WebP')
     }
 
-    if (vp8xChunk) {
-        const updated = Buffer.from(vp8xChunk.raw)
-        updated[8] |= EXIF_FLAG_BIT
-        vp8xChunk = { raw: updated }
+    const json = JSON.stringify(buildExifData(metadata))
+    const jsonLen = Buffer.byteLength(json, 'utf-8')
+    const exifPayloadLen = EXIF_ATTR.length + jsonLen
+    const exifChunkLen = 8 + exifPayloadLen + (exifPayloadLen & 1)
+
+    const VP8X_LEN = 18 // 8 header + 10 payload
+
+    let keptLen = 0
+    for (let i = 0; i < spans.length; i += 2) keptLen += spans[i + 1] - spans[i]
+
+    const totalLen = 12 + VP8X_LEN + keptLen + exifChunkLen
+    const out = Buffer.allocUnsafe(totalLen)
+
+    // RIFF header
+    out.writeUInt32LE(RIFF, 0)
+    out.writeUInt32LE(totalLen - 8, 4)
+    out.writeUInt32LE(WEBP, 8)
+
+    // VP8X chunk — copy existing (set EXIF flag) or synthesize for simple-format WebPs.
+    let pos = 12
+    if (vp8x !== -1) {
+        webpBuffer.copy(out, pos, vp8x, vp8x + VP8X_LEN)
+        out[pos + 8] |= EXIF_FLAG_BIT
     } else {
-        if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
-            throw new Error('writeExif: width/height required to synthesize VP8X for a simple-format WebP')
-        }
-        const vp8xPayload = Buffer.alloc(10)
-        vp8xPayload[0] = EXIF_FLAG_BIT
-        vp8xPayload.writeUIntLE(width - 1, 4, 3)
-        vp8xPayload.writeUIntLE(height - 1, 7, 3)
-        vp8xChunk = { raw: makeChunk('VP8X', vp8xPayload) }
+        out.writeUInt32LE(FOURCC_VP8X, pos)
+        out.writeUInt32LE(10, pos + 4)
+        out[pos + 8] = EXIF_FLAG_BIT
+        out[pos + 9] = 0
+        out[pos + 10] = 0
+        out[pos + 11] = 0
+        out.writeUIntLE(width - 1, pos + 12, 3)
+        out.writeUIntLE(height - 1, pos + 15, 3)
+    }
+    pos += VP8X_LEN
+
+    // Remaining chunks: straight memcpy per span.
+    for (let i = 0; i < spans.length; i += 2) {
+        webpBuffer.copy(out, pos, spans[i], spans[i + 1])
+        pos += spans[i + 1] - spans[i]
     }
 
-    const body = Buffer.concat([
-        Buffer.from('WEBP', 'ascii'),
-        vp8xChunk.raw,
-        ...rest.map(c => c.raw),
-        exifChunk
-    ])
-    const out = Buffer.concat([Buffer.from('RIFF', 'ascii'), Buffer.alloc(4), body])
-    out.writeUInt32LE(out.length - 8, 4)
+    // EXIF chunk written in place.
+    out.writeUInt32LE(FOURCC_EXIF, pos)
+    out.writeUInt32LE(exifPayloadLen, pos + 4)
+    EXIF_ATTR.copy(out, pos + 8)
+    out.writeUIntLE(jsonLen, pos + 8 + 14, 4)
+    out.write(json, pos + 8 + EXIF_ATTR.length, jsonLen, 'utf-8')
+    if (exifPayloadLen & 1) out[pos + 8 + exifPayloadLen] = 0
+
     return out
 }
 
