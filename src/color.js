@@ -6,10 +6,44 @@ const NAMED_COLORS = {
     brown: '#a52a2a', transparent: 'rgba(0,0,0,0)'
 }
 
+function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360 / 360;
+    s = Math.max(0, Math.min(1, s));
+    l = Math.max(0, Math.min(1, l));
+    
+    if (s === 0) {
+        const v = Math.round(l * 255);
+        return { r: v, g: v, b: v };
+    }
+    
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    
+    const hueToRgb = (t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1/6) return p + (q - p) * 6 * t;
+        if (t < 1/2) return q;
+        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
+    };
+    
+    return {
+        r: Math.round(hueToRgb(h + 1/3) * 255),
+        g: Math.round(hueToRgb(h) * 255),
+        b: Math.round(hueToRgb(h - 1/3) * 255)
+    };
+}
+
+function parseHsl(h, s, l, a = 1) {
+    const { r, g, b } = hslToRgb(h, s, l);
+    return { r, g, b, a };
+}
+
 /**
  * Parse a CSS-style color string into {r,g,b,a} with r/g/b in 0-255 and a in 0-1.
- * Supports: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(...), rgba(...), a small set
- * of named colors, and "transparent".
+ * Supports: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(...), rgba(...), hsl(...), hsla(...),
+ * a small set of named colors, and "transparent".
  */
 function parseColor(input) {
     if (input && typeof input === 'object' && 'r' in input) {
@@ -40,6 +74,7 @@ function parseColor(input) {
         throw new Error(`Invalid hex color: ${input}`)
     }
 
+    // RGB/RGBA
     const rgbMatch = str.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/)
     if (rgbMatch) {
         return {
@@ -48,6 +83,17 @@ function parseColor(input) {
             b: Math.round(parseFloat(rgbMatch[3])),
             a: rgbMatch[4] !== undefined ? parseFloat(rgbMatch[4]) : 1
         }
+    }
+
+    // HSL/HSLA
+    const hslMatch = str.match(/^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/)
+    if (hslMatch) {
+        return parseHsl(
+            parseFloat(hslMatch[1]),
+            parseFloat(hslMatch[2]) / 100,
+            parseFloat(hslMatch[3]) / 100,
+            hslMatch[4] !== undefined ? parseFloat(hslMatch[4]) : 1
+        )
     }
 
     throw new Error(`Unrecognized color format: ${input}`)
