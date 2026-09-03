@@ -117,8 +117,8 @@ class PixCore {
         if (format === 'webp') {
             const buffer = await encode.toWebp(this._img, resolved.quality ?? 80)
             if (resolved.exif) {
-                const { width, height } = this.metadata()
-                return writeExif(buffer, { width, height }, resolved.exif)
+                // Reading dimensions directly — metadata() would run a full-image
+                return writeExif(buffer, { width: this._img.width, height: this._img.height }, resolved.exif)
             }
             return buffer
         }
