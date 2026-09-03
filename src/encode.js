@@ -49,7 +49,7 @@ async function toWebp({ data, width, height }, quality = 80) {
     }
     
     const imageData = {
-        data: Buffer.from(data),
+        data: ArrayBuffer.isView(data) ? data : Buffer.from(data),
         width,
         height
     }
