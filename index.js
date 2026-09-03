@@ -65,6 +65,17 @@ class PixCore {
         const overlayImgs = await Promise.all(layers.map(layer =>
             Buffer.isBuffer(layer.input) ? decode(layer.input) : layer.input
         ))
+        overlayImgs.forEach((overlay, i) => {
+            const isValid = overlay &&
+                overlay.data instanceof Uint8Array &&
+                Number.isInteger(overlay.width) && overlay.width > 0 &&
+                Number.isInteger(overlay.height) && overlay.height > 0
+            if (!isValid) {
+                throw new Error(
+                    `composite: layers[${i}].input is invalid. Use Buffer, { data, width, height }, or canvas.toImage()`
+                )
+            }
+        })
         layers.forEach((layer, i) => {
             this._img = ops.composite(this._img, overlayImgs[i], { left: layer.left || 0, top: layer.top || 0 })
         })
