@@ -5,6 +5,11 @@ function crop({ data, width, height }, x, y, w, h) {
     h = Math.max(1, Math.min(h, height - y));
 
     const out = new Uint8Array(w * h * 4);
+    // Full-width crop: contiguous region, single copy.
+    if (x === 0 && w === width) {
+        out.set(data.subarray(y * width * 4, (y + h) * width * 4));
+        return { data: out, width: w, height: h };
+    }
     for (let row = 0; row < h; row++) {
         const srcOffset = ((y + row) * width + x) * 4;
         const dstOffset = row * w * 4;
@@ -19,6 +24,23 @@ function downsampleBy2({ data, width, height }, { halveW = true, halveH = true }
     const stepX = halveW ? 2 : 1;
     const stepY = halveH ? 2 : 1;
     const out = new Uint8Array(newW * newH * 4);
+
+    if (halveW && halveH && newW * 2 <= width && newH * 2 <= height) {
+        for (let y = 0; y < newH; y++) {
+            let s0 = (y * 2) * width * 4;        // top row pointer
+            let s1 = s0 + width * 4;             // bottom row pointer
+            let d = y * newW * 4;
+            for (let x = 0; x < newW; x++) {
+                out[d] = (data[s0] + data[s0 + 4] + data[s1] + data[s1 + 4] + 2) >> 2;
+                out[d + 1] = (data[s0 + 1] + data[s0 + 5] + data[s1 + 1] + data[s1 + 5] + 2) >> 2;
+                out[d + 2] = (data[s0 + 2] + data[s0 + 6] + data[s1 + 2] + data[s1 + 6] + 2) >> 2;
+                out[d + 3] = (data[s0 + 3] + data[s0 + 7] + data[s1 + 3] + data[s1 + 7] + 2) >> 2;
+                s0 += 8; s1 += 8; d += 4;
+            }
+        }
+        return { data: out, width: newW, height: newH };
+    }
+
     for (let y = 0; y < newH; y++) {
         const srcY = y * stepY;
         const outRowBase = y * newW * 4;
@@ -67,41 +89,46 @@ function resizeBilinear({ data, width, height }, targetW, targetH) {
     const xRatio = width / targetW;
     const yRatio = height / targetH;
 
+    // Precompute horizontal sample offsets/weights once instead of per row:
+    // saves targetH * targetW floor/min/frac computations.
+    const xOff0 = new Int32Array(targetW);
+    const xOff1 = new Int32Array(targetW);
+    const xW = new Float32Array(targetW);
+    for (let tx = 0; tx < targetW; tx++) {
+        const srcX = tx * xRatio;
+        const x0 = srcX | 0;
+        xOff0[tx] = x0 * 4;
+        xOff1[tx] = (x0 + 1 < width ? x0 + 1 : width - 1) * 4;
+        xW[tx] = srcX - x0;
+    }
+
     for (let ty = 0; ty < targetH; ty++) {
         const srcY = ty * yRatio;
-        const y0 = Math.floor(srcY);
-        const y1 = Math.min(y0 + 1, height - 1);
+        const y0 = srcY | 0;
+        const y1 = y0 + 1 < height ? y0 + 1 : height - 1;
         const yFrac = srcY - y0;
         const yFracInv = 1 - yFrac;
-        const row0 = y0 * width;
-        const row1 = y1 * width;
-        const outRowBase = ty * targetW * 4;
+        const row0 = y0 * width * 4;
+        const row1 = y1 * width * 4;
+        let outIdx = ty * targetW * 4;
 
         for (let tx = 0; tx < targetW; tx++) {
-            const srcX = tx * xRatio;
-            const x0 = Math.floor(srcX);
-            const x1 = Math.min(x0 + 1, width - 1);
-            const xFrac = srcX - x0;
+            const xFrac = xW[tx];
             const xFracInv = 1 - xFrac;
+            const i00 = row0 + xOff0[tx];
+            const i10 = row0 + xOff1[tx];
+            const i01 = row1 + xOff0[tx];
+            const i11 = row1 + xOff1[tx];
 
-            const i00 = (row0 + x0) * 4;
-            const i10 = (row0 + x1) * 4;
-            const i01 = (row1 + x0) * 4;
-            const i11 = (row1 + x1) * 4;
-            const outIdx = outRowBase + tx * 4;
-
-            out[outIdx] = Math.round(
-                (data[i00] * xFracInv + data[i10] * xFrac) * yFracInv +
-                (data[i01] * xFracInv + data[i11] * xFrac) * yFrac);
-            out[outIdx + 1] = Math.round(
-                (data[i00 + 1] * xFracInv + data[i10 + 1] * xFrac) * yFracInv +
-                (data[i01 + 1] * xFracInv + data[i11 + 1] * xFrac) * yFrac);
-            out[outIdx + 2] = Math.round(
-                (data[i00 + 2] * xFracInv + data[i10 + 2] * xFrac) * yFracInv +
-                (data[i01 + 2] * xFracInv + data[i11 + 2] * xFrac) * yFrac);
-            out[outIdx + 3] = Math.round(
-                (data[i00 + 3] * xFracInv + data[i10 + 3] * xFrac) * yFracInv +
-                (data[i01 + 3] * xFracInv + data[i11 + 3] * xFrac) * yFrac);
+            out[outIdx] = ((data[i00] * xFracInv + data[i10] * xFrac) * yFracInv +
+                (data[i01] * xFracInv + data[i11] * xFrac) * yFrac + 0.5) | 0;
+            out[outIdx + 1] = ((data[i00 + 1] * xFracInv + data[i10 + 1] * xFrac) * yFracInv +
+                (data[i01 + 1] * xFracInv + data[i11 + 1] * xFrac) * yFrac + 0.5) | 0;
+            out[outIdx + 2] = ((data[i00 + 2] * xFracInv + data[i10 + 2] * xFrac) * yFracInv +
+                (data[i01 + 2] * xFracInv + data[i11 + 2] * xFrac) * yFrac + 0.5) | 0;
+            out[outIdx + 3] = ((data[i00 + 3] * xFracInv + data[i10 + 3] * xFrac) * yFracInv +
+                (data[i01 + 3] * xFracInv + data[i11 + 3] * xFrac) * yFrac + 0.5) | 0;
+            outIdx += 4;
         }
     }
     return { data: out, width: targetW, height: targetH };
@@ -157,15 +184,15 @@ function flip({ data, width, height }) {
 }
 
 function flop({ data, width, height }) {
+    // Uint32 view: one read/write per pixel instead of four.
     const out = new Uint8Array(data.length);
+    const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
+    const dst32 = new Uint32Array(out.buffer);
     for (let row = 0; row < height; row++) {
+        let s = row * width;
+        let d = s + width - 1;
         for (let col = 0; col < width; col++) {
-            const srcIdx = (row * width + col) * 4;
-            const dstIdx = (row * width + (width - 1 - col)) * 4;
-            out[dstIdx] = data[srcIdx];
-            out[dstIdx + 1] = data[srcIdx + 1];
-            out[dstIdx + 2] = data[srcIdx + 2];
-            out[dstIdx + 3] = data[srcIdx + 3];
+            dst32[d - col] = src32[s + col];
         }
     }
     return { data: out, width, height };
@@ -173,26 +200,25 @@ function flop({ data, width, height }) {
 
 /** 90deg clockwise rotation */
 function rotate90({ data, width, height }) {
+    // Uint32 pixel moves (one op per pixel) with the same size-based
+    // tiled fallback for cache locality on large images.
     const out = new Uint8Array(data.length);
     const newW = height, newH = width;
+    const src32 = new Uint32Array(data.buffer, data.byteOffset, width * height);
+    const dst32 = new Uint32Array(out.buffer);
 
     if (data.length < 12_000_000) {
         for (let row = 0; row < height; row++) {
             const srcRowBase = row * width;
             const dstCol = height - 1 - row;
             for (let col = 0; col < width; col++) {
-                const srcIdx = (srcRowBase + col) * 4;
-                const dstIdx = (col * newW + dstCol) * 4;
-                out[dstIdx] = data[srcIdx];
-                out[dstIdx + 1] = data[srcIdx + 1];
-                out[dstIdx + 2] = data[srcIdx + 2];
-                out[dstIdx + 3] = data[srcIdx + 3];
+                dst32[col * newW + dstCol] = src32[srcRowBase + col];
             }
         }
         return { data: out, width: newW, height: newH };
     }
 
-    const TILE = 32;
+    const TILE = 64;
     for (let rowTile = 0; rowTile < height; rowTile += TILE) {
         const rowEnd = Math.min(rowTile + TILE, height);
         for (let colTile = 0; colTile < width; colTile += TILE) {
@@ -201,12 +227,7 @@ function rotate90({ data, width, height }) {
                 const srcRowBase = row * width;
                 const dstCol = height - 1 - row;
                 for (let col = colTile; col < colEnd; col++) {
-                    const srcIdx = (srcRowBase + col) * 4;
-                    const dstIdx = (col * newW + dstCol) * 4;
-                    out[dstIdx] = data[srcIdx];
-                    out[dstIdx + 1] = data[srcIdx + 1];
-                    out[dstIdx + 2] = data[srcIdx + 2];
-                    out[dstIdx + 3] = data[srcIdx + 3];
+                    dst32[col * newW + dstCol] = src32[srcRowBase + col];
                 }
             }
         }
@@ -381,11 +402,13 @@ function extend({ data, width, height }, { top = 0, bottom = 0, left = 0, right 
     const newW = width + left + right;
     const newH = height + top + bottom;
     const out = new Uint8Array(newW * newH * 4);
-    for (let i = 0; i < out.length; i += 4) {
-        out[i] = background[0] || 0;
-        out[i + 1] = background[1] || 0;
-        out[i + 2] = background[2] || 0;
-        out[i + 3] = background[3] ?? 255;
+    // Fill via a Uint32 view — single native fill instead of 4 writes/pixel.
+    const r = background[0] || 0, g = background[1] || 0, b = background[2] || 0;
+    const a = background[3] ?? 255;
+    if (r || g || b || a) {
+        new Uint32Array(out.buffer).fill(
+            (r | (g << 8) | (b << 16) | (a << 24)) >>> 0
+        );
     }
     for (let row = 0; row < height; row++) {
         const srcOffset = row * width * 4;
@@ -471,8 +494,17 @@ function composite(base, overlayImg, { left = 0, top = 0 } = {}) {
             if (dstCol < 0 || dstCol >= base.width) continue;
             const srcIdx = (row * overlayImg.width + col) * 4;
             const dstIdx = (dstRow * base.width + dstCol) * 4;
-            const srcA = overlayImg.data[srcIdx + 3] / 255;
-            if (srcA === 0) continue;
+            const srcA8 = overlayImg.data[srcIdx + 3];
+            if (srcA8 === 0) continue;
+            // Fully opaque overlay pixel: straight copy, no blending math.
+            if (srcA8 === 255) {
+                out[dstIdx] = overlayImg.data[srcIdx];
+                out[dstIdx + 1] = overlayImg.data[srcIdx + 1];
+                out[dstIdx + 2] = overlayImg.data[srcIdx + 2];
+                out[dstIdx + 3] = 255;
+                continue;
+            }
+            const srcA = srcA8 / 255;
             const dstA = out[dstIdx + 3] / 255;
             const outA = srcA + dstA * (1 - srcA);
             if (outA === 0) {
