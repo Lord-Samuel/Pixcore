@@ -2,13 +2,34 @@ import Crypto from 'crypto'
 
 const EXIF_FLAG_BIT = 0x08 // VP8X flags byte, bit 3: "has EXIF metadata"
 
-function buildExifPayload(metadata) {
+function buildExifData(metadata) {
+    if (metadata.categories !== undefined && !Array.isArray(metadata.categories)) {
+        throw new Error('writeExif: metadata.categories must be an array of emoji strings')
+    }
+    if (metadata.packId !== undefined && typeof metadata.packId !== 'string') {
+        throw new Error('writeExif: metadata.packId must be a string')
+    }
+
     const exifData = {
-        'sticker-pack-id': Crypto.randomBytes(32).toString('hex'),
+        'sticker-pack-id': metadata.packId || Crypto.randomBytes(32).toString('hex'),
         'sticker-pack-name': metadata.packname || '',
         'sticker-pack-publisher': metadata.author || '',
         'emojis': metadata.categories || ['']
     }
+
+    if (metadata.publisherEmail !== undefined) exifData['sticker-pack-publisher-email'] = metadata.publisherEmail
+    if (metadata.publisherWebsite !== undefined) exifData['sticker-pack-publisher-website'] = metadata.publisherWebsite
+    if (metadata.androidAppStoreLink !== undefined) exifData['android-app-store-link'] = metadata.androidAppStoreLink
+    if (metadata.iosAppStoreLink !== undefined) exifData['ios-app-store-link'] = metadata.iosAppStoreLink
+    if (metadata.privacyPolicyWebsite !== undefined) exifData['privacy-policy-website'] = metadata.privacyPolicyWebsite
+    if (metadata.licenseAgreementWebsite !== undefined) exifData['license-agreement-website'] = metadata.licenseAgreementWebsite
+    if (metadata.isAvatarSticker !== undefined) exifData['is-avatar-sticker'] = metadata.isAvatarSticker ? 1 : 0
+
+    return exifData
+}
+
+function buildExifPayload(metadata) {
+    const exifData = buildExifData(metadata)
 
     const exifAttr = Buffer.from([
         0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
@@ -89,4 +110,4 @@ function writeExif(webpBuffer, { width, height }, metadata = {}) {
     return out
 }
 
-export { writeExif }
+export { writeExif, buildExifData }
