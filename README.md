@@ -147,6 +147,8 @@ const img = pix.PixCore.fromCanvas(canvas)
 const buffer = await img.png().toBuffer()
 ```
 
+(`pix.fromCanvas(canvas)` works identically, if you'd rather not reach through `PixCore`.)
+
 ### Shapes
 
 All shape methods return `this` for chaining, and accept `fill`/`stroke`/`strokeWidth`. `fill` accepts a CSS-style color string (`'#ff0000'`, `'rgba(255,0,0,0.5)'`, `'hsl(200,80%,50%)'`, named colors) **or** a gradient descriptor (see below).
@@ -222,6 +224,8 @@ await canvas.text('WATERMARK', { x: 10, y: 50, size: 28, color: 'rgba(255,255,25
 const img = await pix.read(photoBuffer)
 await img.composite([{ input: canvas.toImage(), left: 20, top: 20 }])
 ```
+
+Or wrap the canvas as its own `PixCore` instance first (via `pix.fromCanvas(canvas)`) if you want to run transforms — resize, filters, etc. — on it before compositing or encoding it directly.
 
 ## Supported formats
 
