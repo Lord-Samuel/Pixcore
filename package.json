@@ -1,6 +1,6 @@
 {
   "name": "pixcore",
-  "version": "1.2.0",
+  "version": "1.3.1",
   "type": "module",
   "description": "Lightweight, fast, zero-dependency image processing + canvas library for Node.js",
   "keywords": [
