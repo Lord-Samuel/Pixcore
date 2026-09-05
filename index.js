@@ -12,7 +12,6 @@ class PixCore {
         this._targetFormat = null
     }
 
-    /** Wrap a canvas (from createCanvas) so it can go through resize/composite/toBuffer etc. */
     static fromCanvas(canvas) {
         return new PixCore(canvas.toImage())
     }
@@ -117,7 +116,6 @@ class PixCore {
         if (format === 'webp') {
             const buffer = await encode.toWebp(this._img, resolved.quality ?? 80)
             if (resolved.exif) {
-                // Reading dimensions directly — metadata() would run a full-image
                 return writeExif(buffer, { width: this._img.width, height: this._img.height }, resolved.exif)
             }
             return buffer
@@ -133,4 +131,8 @@ async function read(buffer) {
     return new PixCore(decoded)
 }
 
-export { read, PixCore, createCanvas }
+function fromCanvas(canvas) {
+    return new PixCore(canvas.toImage())
+}
+
+export { read, PixCore, createCanvas, fromCanvas }
