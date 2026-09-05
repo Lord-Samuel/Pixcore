@@ -1,6 +1,21 @@
 import { readFile } from 'fs/promises'
+import { fileURLToPath } from 'url'
+import path from 'path'
 import { parseColor } from './color.js'
 import { commandsToContours, fillContours } from './raster.js'
+import { loadColorBitmapFont } from './emoji.js'
+import { composite, resizeSmooth } from './ops.js'
+
+// Bundled color emoji font (CBDT/CBLC format), used as the default emojiFont
+// so canvas.text() renders emoji out of the box with no setup required.
+const BUNDLED_EMOJI_FONT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'font', 'NotoColorEmoji-Ed.ttf')
+
+// Decoded+scaled emoji bitmaps are cached by (font path, codepoint, size):
+// decoding the embedded PNG and resizing it is the expensive part of drawing
+// an emoji glyph, and the same emoji at the same text size is commonly
+// reused many times. Safe to share the cached image across draws since
+// ops.composite() only ever reads its overlay argument, never mutates it.
+const emojiBitmapCache = new WeakMap()
 
 let opentypeMod = null
 async function getOpentype() {
@@ -193,10 +208,7 @@ class Canvas {
     rect({ x, y, width, height, radius = 0, fill, stroke, strokeWidth = 1 }) {
         const contours = commandsToContours(rectCommands(x, y, width, height, radius))
         if (stroke) {
-            // Expanded by the FULL strokeWidth, not half: the fill drawn on top
-            // (below) covers everything up to the original edge, so the visible
-            // ring is exactly [edge, edge+strokeWidth] — the stroke sits just
-            // outside the shape rather than being centered on its path.
+            // Full strokeWidth expansion, stroke sits outside the shape.
             const strokeContours = commandsToContours(
                 rectCommands(x - strokeWidth, y - strokeWidth, width + strokeWidth * 2, height + strokeWidth * 2, radius + strokeWidth)
             )
@@ -213,7 +225,7 @@ class Canvas {
     ellipse({ x, y, rx, ry, fill, stroke, strokeWidth = 1 }) {
         const contours = commandsToContours(ellipseCommands(x, y, rx, ry))
         if (stroke) {
-            // See rect() above: full strokeWidth expansion, stroke sits outside the shape.
+            // Full strokeWidth expansion, stroke sits outside the shape.
             const strokeContours = commandsToContours(ellipseCommands(x, y, rx + strokeWidth, ry + strokeWidth))
             this._fillContours(strokeContours, stroke)
         }
@@ -221,39 +233,123 @@ class Canvas {
         return this
     }
 
-    // Add to canvas.js - text() method with stroke support
-    async text(str, { x, y, size = 24, color = '#000000', font, align = 'left', strokeColor, strokeWidth = 0 }) {
+    /**
+     * text(str, { x, y, size, color, font, align, strokeColor, strokeWidth, emojiFont, colorFont })
+     * x,y is the baseline origin (left edge for align:'left', the default).
+     * font: path to a .ttf/.otf file. Requires the optional "opentype.js" package.
+     *
+     * Two different color-emoji font formats exist and need different handling:
+     *   colorFont: a COLR/CPAL font (e.g. the Noto Color Emoji build from
+     *     Google Fonts) — layered vector glyphs with palette colors. Rendered
+     *     directly via opentype.js's native getPaths()/charToGlyph() support,
+     *     no raster step involved. No default; pass this if you have one.
+     *   emojiFont: a CBDT/CBLC bitmap font (e.g. the classic Android Noto
+     *     Color Emoji build) — every glyph is an embedded PNG, decoded and
+     *     composited as an image. Defaults to a bundled copy of this format,
+     *     so emoji render out of the box even with no options at all.
+     * Regular text fonts have no emoji glyphs in either format — without one
+     * of the above resolving a given emoji, it's skipped (with a
+     * console.warn) rather than silently producing nothing unexplained.
+     * colorFont is tried first; emojiFont is the fallback for characters it
+     * doesn't cover.
+     */
+    async text(str, { x, y, size = 24, color = '#000000', font, align = 'left', strokeColor, strokeWidth = 0, emojiFont = BUNDLED_EMOJI_FONT, colorFont } = {}) {
         if (!font) throw new Error('canvas.text() requires a font file path via { font }')
         const loadedFont = await loadFont(font)
-    
-        let drawX = x
-        if (align === 'center' || align === 'right') {
-            const width = loadedFont.getAdvanceWidth(str, size)
-            drawX = align === 'center' ? x - width / 2 : x - width
+        const colorFontObj = colorFont ? await loadFont(colorFont) : null
+        const bitmapFont = emojiFont ? loadColorBitmapFont(emojiFont) : null
+
+        // Keycap-base characters exist in emoji fonts' cmaps only to support
+        // keycap sequences (digit + U+20E3 -> 1️⃣), which isn't composed here
+        // (same class of limitation as flags/ZWJ). A bare '5', '#', or '*' in
+        // normal text must never be hijacked into a tiny colored glyph.
+        const KEYCAP_BASES = new Set([0x23, 0x2A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39])
+
+        // Partition into runs: consecutive plain codepoints are batched into
+        // one run (preserves kerning/shaping within it); each resolved emoji
+        // codepoint (via either color-font format) is its own run.
+        const runs = []
+        let currentText = ''
+        for (const ch of str) { // for...of a string iterates by codepoint, handling surrogate pairs correctly
+            const codepoint = ch.codePointAt(0)
+            const isKeycapBase = KEYCAP_BASES.has(codepoint)
+            const colorGlyph = (!isKeycapBase && colorFontObj) ? colorFontObj.charToGlyph(ch) : null
+            const bitmapGlyph = (!isKeycapBase && !colorGlyph && bitmapFont) ? bitmapFont.getGlyphImage(codepoint) : null
+
+            if (colorGlyph && colorGlyph.index > 0) {
+                if (currentText) { runs.push({ type: 'text', str: currentText }); currentText = '' }
+                runs.push({ type: 'colr', char: ch })
+            } else if (bitmapGlyph) {
+                if (currentText) { runs.push({ type: 'text', str: currentText }); currentText = '' }
+                runs.push({ type: 'emoji', glyph: bitmapGlyph })
+            } else {
+                if (codepoint > 0xFFFF && !colorFontObj && !bitmapFont) {
+                    console.warn(`canvas.text(): "${ch}" (U+${codepoint.toString(16).toUpperCase()}) has no glyph in a typical text font and no colorFont/emojiFont was provided — it will not render.`)
+                }
+                currentText += ch
+            }
         }
-    
-        const path = loadedFont.getPath(str, drawX, y, size)
-        const contours = commandsToContours(path.commands)
-    
-        // Draw stroke outline first if specified
-        if (strokeColor && strokeWidth > 0) {
-            this._fillContours(offsetContours(contours, strokeWidth / 2), strokeColor)
+        if (currentText) runs.push({ type: 'text', str: currentText })
+
+        // Measure total width across all runs for alignment.
+        let totalWidth = 0
+        for (const run of runs) {
+            if (run.type === 'text') totalWidth += loadedFont.getAdvanceWidth(run.str, size)
+            else if (run.type === 'colr') totalWidth += colorFontObj.getAdvanceWidth(run.char, size)
+            else totalWidth += (run.glyph.advance / run.glyph.ppemY) * size
         }
-    
-        // Then fill with main color
-        this._fillContours(contours, color)
+
+        let cursorX = x
+        if (align === 'center') cursorX = x - totalWidth / 2
+        else if (align === 'right') cursorX = x - totalWidth
+
+        for (const run of runs) {
+            if (run.type === 'text') {
+                const path = loadedFont.getPath(run.str, cursorX, y, size)
+                const contours = commandsToContours(path.commands)
+                if (strokeColor && strokeWidth > 0) this._fillContours(offsetContours(contours, strokeWidth / 2), strokeColor)
+                this._fillContours(contours, color)
+                cursorX += loadedFont.getAdvanceWidth(run.str, size)
+            } else if (run.type === 'colr') {
+                const paths = colorFontObj.getPaths(run.char, cursorX, y, size, { fill: color })
+                for (const path of paths) {
+                    this._fillContours(commandsToContours(path.commands), path.fill || color)
+                }
+                cursorX += colorFontObj.getAdvanceWidth(run.char, size)
+            } else {
+                cursorX += await this._drawEmojiGlyph(run.glyph, cursorX, y, size)
+            }
+        }
         return this
     }
 
-    // ========== NEW METHODS ==========
+    /** Decode + scale + composite one emoji bitmap glyph; returns its scaled advance width. */
+    async _drawEmojiGlyph(glyph, cursorX, y, size) {
+        const scale = size / glyph.ppemY
 
-    /**
-     * gradient({ type: 'linear'|'radial', from, to, stops })
-     * Paints the gradient across the entire canvas, overwriting existing
-     * content (this does not blend with or clip to prior drawing — call it
-     * first, as a background, or use a gradient descriptor as a shape's
-     * `fill` instead to clip a gradient to that shape).
-     */
+        let sizeCache = emojiBitmapCache.get(glyph)
+        if (!sizeCache) { sizeCache = new Map(); emojiBitmapCache.set(glyph, sizeCache) }
+
+        let resized = sizeCache.get(size)
+        if (!resized) {
+            const { decode } = await import('./decode.js') // lazy: keeps canvas.js shape-only usage free of the pngjs/jpeg-js/webp dependency chain
+            const decoded = await decode(Buffer.from(glyph.pngBuffer))
+            const scaledW = Math.max(1, Math.round(decoded.width * scale))
+            const scaledH = Math.max(1, Math.round(decoded.height * scale))
+            resized = (scaledW === decoded.width && scaledH === decoded.height)
+                ? decoded
+                : resizeSmooth(decoded, scaledW, scaledH)
+            sizeCache.set(size, resized)
+        }
+
+        const left = Math.round(cursorX + glyph.bearingX * scale)
+        const top = Math.round(y - glyph.bearingY * scale)
+        const result = composite({ data: this.data, width: this.width, height: this.height }, resized, { left, top })
+        this.data = result.data
+
+        return glyph.advance * scale
+    }
+
     gradient({ type = 'linear', from = { x: 0, y: 0 }, to, stops = [] } = {}) {
         const sampler = makeGradientSampler({ type, from, to, stops }, this.width, this.height)
         for (let y = 0; y < this.height; y++) {
@@ -269,18 +365,12 @@ class Canvas {
         return this
     }
 
-    /** line({ x1, y1, x2, y2, color, width = 1 }) */
     line({ x1, y1, x2, y2, color, width = 1 }) {
         const dx = x2 - x1, dy = y2 - y1
         const len = Math.hypot(dx, dy)
-        // Perpendicular unit vector, scaled to half the stroke width.
         const half = width / 2
         const nx = len > 0 ? (-dy / len) * half : half
         const ny = len > 0 ? (dx / len) * half : 0
-
-        // A single quad along the line, filled once — correct alpha (no
-        // compounding from overlapping stamps) and O(line area) instead of
-        // O(length) circle fills.
         const commands = [
             { type: 'M', x: x1 + nx, y: y1 + ny },
             { type: 'L', x: x2 + nx, y: y2 + ny },
@@ -292,7 +382,6 @@ class Canvas {
         return this
     }
 
-    /** path({ commands, fill, stroke, strokeWidth }) */
     path({ commands, fill, stroke, strokeWidth = 1 }) {
         const contours = commandsToContours(commands)
         if (stroke) this._fillContours(offsetContours(contours, strokeWidth / 2), stroke)
@@ -300,17 +389,14 @@ class Canvas {
         return this
     }
 
-    /** arc({ x, y, radius, startAngle, endAngle, fill, stroke, strokeWidth }) */
     arc({ x, y, radius, startAngle = 0, endAngle = Math.PI * 2, fill, stroke, strokeWidth = 1 }) {
         const sweep = Math.abs(endAngle - startAngle)
         const isFullCircle = sweep >= Math.PI * 2 - 1e-9
         const segments = Math.max(8, Math.floor(sweep * 16))
         const commands = []
 
-        // Partial arcs get a pie-wedge shape (path through the center, like a
-        // clock hand sweep) — the usual meaning of a filled arc (pac-man,
-        // progress rings). A full circle skips the center: adding a line to
-        // it and back would just be a zero-area slit at the seam.
+        // Partial arcs get a pie-wedge shape (path through the center), the
+        // usual meaning of a filled arc. A full circle skips the center.
         if (!isFullCircle) {
             commands.push({ type: 'M', x, y })
             commands.push({ type: 'L', x: x + radius * Math.cos(startAngle), y: y + radius * Math.sin(startAngle) })
@@ -323,7 +409,7 @@ class Canvas {
             commands.push({ type: 'L', x: x + radius * Math.cos(angle), y: y + radius * Math.sin(angle) })
         }
 
-        commands.push({ type: 'Z' }) // for the wedge case, this closes straight back to center
+        commands.push({ type: 'Z' })
 
         const contours = commandsToContours(commands)
         if (stroke) this._fillContours(offsetContours(contours, strokeWidth / 2), stroke)
@@ -331,23 +417,19 @@ class Canvas {
         return this
     }
 
-    /** polygon({ points, fill, stroke, strokeWidth }) */
     polygon({ points, fill, stroke, strokeWidth = 1 }) {
         if (!points || points.length < 3) return this
-
         const commands = [
             { type: 'M', x: points[0].x, y: points[0].y },
             ...points.slice(1).map(p => ({ type: 'L', x: p.x, y: p.y })),
             { type: 'Z' }
         ]
-
         const contours = commandsToContours(commands)
         if (stroke) this._fillContours(offsetContours(contours, strokeWidth / 2), stroke)
         if (fill) this._fillContours(contours, fill)
         return this
     }
 
-    /** triangle({ x1, y1, x2, y2, x3, y3, fill, stroke, strokeWidth }) */
     triangle({ x1, y1, x2, y2, x3, y3, fill, stroke, strokeWidth = 1 }) {
         return this.polygon({
             points: [{ x: x1, y: y1 }, { x: x2, y: y2 }, { x: x3, y: y3 }],
@@ -357,7 +439,6 @@ class Canvas {
         })
     }
 
-    /** star({ x, y, points = 5, outerRadius, innerRadius, fill, stroke, strokeWidth }) */
     star({ x, y, points = 5, outerRadius, innerRadius = outerRadius * 0.5, fill, stroke, strokeWidth = 1 }) {
         const vertices = []
         for (let i = 0; i < points * 2; i++) {
@@ -371,14 +452,13 @@ class Canvas {
         return this.polygon({ points: vertices, fill, stroke, strokeWidth })
     }
 
-    /** textBg(str, { x, y, size, color, font, align, bg, bgPadding, borderRadius }) */
     async textBg(str, { x, y, size = 24, color = '#000000', font, align = 'left', bg = 'rgba(0,0,0,0.5)', bgPadding = 10, borderRadius = 6 }) {
         if (!font) throw new Error('canvas.textBg() requires a font file path via { font }')
         const loadedFont = await loadFont(font)
 
         let drawX = x
         let textWidth = loadedFont.getAdvanceWidth(str, size)
-        
+
         if (align === 'center') {
             drawX = x - textWidth / 2
         } else if (align === 'right') {
