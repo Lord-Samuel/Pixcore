@@ -2,6 +2,7 @@ import { PNG } from 'pngjs'
 import jpeg from 'jpeg-js'
 import { createRequire } from 'module'
 import { readFile } from 'fs/promises'
+import { isAnimatedWebp, decodeAnimatedWebp } from './animated.js'
 
 const require = createRequire(import.meta.url)
 
@@ -63,8 +64,25 @@ async function decode(buffer) {
         return { data: raw.data, width: raw.width, height: raw.height, format, originalSize };
     }
     const webpDecode = await getWebpDecoder();
+
+    if (isAnimatedWebp(buffer)) {
+        const anim = await decodeAnimatedWebp(buffer, webpDecode);
+        const first = anim.frames[0];
+        return {
+            data: first ? first.data : new Uint8Array(anim.width * anim.height * 4),
+            width: anim.width,
+            height: anim.height,
+            format,
+            originalSize,
+            animated: true,
+            loop: anim.loop,
+            background: anim.background,
+            frames: anim.frames,
+        };
+    }
+
     const imageData = await webpDecode(buffer);
     return { data: new Uint8Array(imageData.data), width: imageData.width, height: imageData.height, format, originalSize };
 }
 
-export { decode, sniffFormat };
+export { decode, sniffFormat, isAnimatedWebp };
