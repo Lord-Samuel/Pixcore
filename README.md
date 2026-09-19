@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/npm/l/pixcore.svg)](https://github.com/Lord-Samuel/Pixcore/blob/main/LICENSE)
 [![node](https://img.shields.io/node/v/pixcore.svg)](https://www.npmjs.com/package/pixcore)
 
-A fast, chainable image processing and canvas library for Node.js — decode, transform, draw, and encode, with first-class support for WhatsApp-style stickers and color emoji text rendering.
+A fast, chainable image processing and canvas library for Node.js — decode, transform, draw, and encode, with first-class support for WhatsApp-style stickers (including animated ones) and color emoji text rendering.
 
 No native compilation step. No prebuilt binaries to fetch per-platform. Just JavaScript and WebAssembly.
 
@@ -24,10 +24,10 @@ const sticker = await (await pix.read(imageBuffer))
 
 - **Zero native dependencies.** Decoding/encoding runs on pure JS (`pngjs`, `jpeg-js`) and WebAssembly (`@jsquash/webp`) — no `node-gyp`, no platform-specific prebuilt binaries. Install and go, including on serverless/edge runtimes where that matters most.
 - **A real canvas API.** Shapes, gradients, strokes, and text — including color emoji — with no dependency on `node-canvas`/Cairo.
-- **Sticker-aware.** Purpose-built WebP EXIF metadata writing for WhatsApp sticker packs (pack ID, name, publisher, emoji tags, and more), not bolted on as an afterthought.
+- **Sticker-aware, animated included.** Purpose-built WebP EXIF metadata writing for WhatsApp sticker packs (pack ID, name, publisher, emoji tags, and more), plus full animated WebP decode/transform/encode — not bolted on as an afterthought.
 - **Chainable, promise-based API** in the shape you'd expect if you've used `sharp`.
 
-pixcore is not trying to out-benchmark `sharp` at raw pixel throughput — `sharp` wraps `libvips`, native C++ with SIMD, and that's a structural advantage pure JS/WASM can't close. Where pixcore earns its place is zero-native-dependency installs, and a feature set (canvas + emoji + sticker metadata) `sharp` doesn't have at all.
+pixcore is not trying to out-benchmark `sharp` at raw pixel throughput — `sharp` wraps `libvips`, native C++ with SIMD, and that's a structural advantage pure JS/WASM can't close. Where pixcore earns its place is zero-native-dependency installs, and a feature set (canvas + emoji + sticker metadata + animated WebP) `sharp` doesn't have at all.
 
 ## Installation
 
@@ -54,25 +54,27 @@ const thumbnail = await (await pix.read(buffer))
 await fs.writeFile('./thumbnail.png', thumbnail)
 ```
 
-Reading auto-detects PNG, JPEG, or WebP from the buffer's contents — no need to specify the source format.
+Reading auto-detects PNG, JPEG, WebP, or animated WebP from the buffer's contents — no need to specify the source format.
 
 ## API
 
 ### `pix.read(buffer)`
 
-Decodes a PNG/JPEG/WebP buffer and returns a `PixCore` instance for chaining. Async.
+Decodes a PNG/JPEG/WebP (static or animated) buffer and returns a `PixCore` instance for chaining. Async.
 
 ### Transform methods
 
 All of these mutate and return `this`, so calls chain naturally. None of them encode anything — call `.toBuffer()` (or a format-setter + `.toBuffer()`) when you're done transforming.
+
+If the source is an **animated** image, every transform below applies across all frames at once (not just a "preview" frame) — `metadata()`, `frames()`, and `toBuffer()` all stay consistent with whatever you've done. See [Animated WebP](#animated-webp) for the details and the one exception (`trim`'s cropping behavior).
 
 | Method | Description |
 |---|---|
 | `resize(width, height, { fit, background })` | `fit`: `'fill'` (default, stretches), `'cover'` (crops to fill exactly), or `'contain'` (letterboxes to exactly `width`×`height`, padded with `background`, default transparent). Omit either dimension to preserve aspect ratio. |
 | `extract({ left, top, width, height })` | Crop to a region. |
 | `extend({ top, bottom, left, right, background })` | Pad the canvas outward. |
-| `trim({ threshold, background })` | Auto-crop uniform/transparent borders. |
-| `composite(layers)` | Stack images on top. `layers`: `[{ input, left, top }]`, where `input` is a Buffer, a decoded image object, or a canvas (`.toImage()`). |
+| `trim({ threshold, background })` | Auto-crop uniform/transparent borders. On an animated source, crops every frame to one shared bounding box (the union of each frame's content) so frames never end up mismatched sizes. |
+| `composite(layers)` | Stack images on top. `layers`: `[{ input, left, top }]`, where `input` is a Buffer, a decoded image object, or a canvas (`.toImage()`). Each layer's `input` must itself be a still image — an animated buffer/object throws rather than silently compositing only its first frame. |
 | `rotate(degrees)` | Rotates by any multiple of 90°. |
 | `flip()` / `flop()` | Vertical / horizontal mirror. |
 | `grayscale()` / `greyscale()` | Desaturate. |
@@ -85,7 +87,8 @@ All of these mutate and return `this`, so calls chain naturally. None of them en
 
 ### Reading info
 
-- `metadata()` — `{ format, width, height, channels, hasAlpha, size, space }`
+- `metadata()` — `{ format, width, height, channels, hasAlpha, size, space, animated }`, plus `pages` (frame count) and `loop` when `animated` is `true`.
+- `isAnimated()` — shorthand boolean, same as `metadata().animated`.
 - `stats()` — per-channel min/max/mean (async)
 
 ### Encoding
@@ -98,6 +101,8 @@ img.webp({ quality: 90 })
 await img.toBuffer()          // encode using whatever format was set (defaults to jpeg)
 await img.toBuffer({ format: 'webp', quality: 80 })   // or specify inline
 ```
+
+Encoding an **animated** source as `'webp'` writes out the full animation. Encoding it as `'jpeg'` or `'png'` — formats with no animation support — flattens it to just the first frame; the rest of the animation is discarded.
 
 ### Sticker metadata (WebP only)
 
@@ -121,7 +126,43 @@ await img.webp({ quality: 90 }).toBuffer({
 })
 ```
 
-Only `packname`, `author`, and `categories` are commonly needed — everything else is optional. Handles both WebP container variants correctly (synthesizes the required `VP8X` chunk for simple-format sources, reuses it when already present).
+Only `packname`, `author`, and `categories` are commonly needed — everything else is optional. Handles both WebP container variants correctly (synthesizes the required `VP8X` chunk for simple-format sources, reuses it when already present), and works the same whether the source is a still image or an animated one — the animation and its EXIF metadata are both preserved.
+
+If you're sending the result through [Baileys](https://github.com/WhiskeySockets/Baileys) or a similar WhatsApp library, note that whether a sticker plays as animated is decided by what *you* declare when sending it, not by pixcore or by WhatsApp inspecting the file — pass `isAnimated: true` alongside the sticker buffer in your send call.
+
+### Animated WebP
+
+Reading an animated WebP decodes every frame up front:
+
+```js
+const img = await pix.read(animatedBuffer)
+
+img.isAnimated()      // true
+img.metadata()        // { ..., animated: true, pages: 24, loop: 0 }
+
+const frames = img.frames()   // one PixCore per frame
+frames[0].duration            // frame duration in ms
+frames[0].loop                 // the source's loop count
+```
+
+`frames()` gives you independent `PixCore` instances — transform them individually if you need per-frame control:
+
+```js
+const resized = img.frames().map(f => f.resize(200, 200))
+const out = await pix.writeAnimated(resized, { loop: img.metadata().loop, quality: 75 })
+```
+
+Or skip `frames()` entirely and call transforms straight on the animated instance — they run across every frame automatically:
+
+```js
+const out = await (await pix.read(animatedBuffer))
+  .resize(200, 200)
+  .grayscale()
+  .webp({ quality: 75 })
+  .toBuffer()
+```
+
+`pix.writeAnimated(frames, { loop, quality, background })` builds a fresh animated WebP from a list of frames — either `PixCore` instances (as returned by `.frames()`, using their attached `.duration`) or plain `{ data, width, height, duration }` objects. Every frame must share the same width/height; resize them to match first.
 
 ## Canvas
 
@@ -233,7 +274,8 @@ Or wrap the canvas as its own `PixCore` instance first (via `pix.fromCanvas(canv
 |---|---|---|
 | PNG | ✓ | ✓ |
 | JPEG | ✓ | ✓ |
-| WebP | ✓ | ✓ (+ sticker EXIF) |
+| WebP (static) | ✓ | ✓ (+ sticker EXIF) |
+| WebP (animated) | ✓ | ✓ (+ sticker EXIF) |
 
 ## License
 
