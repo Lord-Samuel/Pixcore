@@ -1,6 +1,6 @@
 function crop({ data, width, height }, x, y, w, h) {
-    x = Math.max(0, Math.min(x, width));
-    y = Math.max(0, Math.min(y, height));
+    x = Math.max(0, Math.min(x, width - 1));
+    y = Math.max(0, Math.min(y, height - 1));
     w = Math.max(1, Math.min(w, width - x));
     h = Math.max(1, Math.min(h, height - y));
 
@@ -166,11 +166,13 @@ function resizeContain({ data, width, height }, targetW, targetH, { background =
 }
 
 function grayscale({ data, width, height }) {
+    const out = new Uint8Array(data.length);
     for (let i = 0; i < data.length; i += 4) {
         const lum = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-        data[i] = data[i + 1] = data[i + 2] = lum;
+        out[i] = out[i + 1] = out[i + 2] = lum;
+        out[i + 3] = data[i + 3];
     }
-    return { data, width, height };
+    return { data: out, width, height };
 }
 
 function flip({ data, width, height }) {
@@ -236,12 +238,14 @@ function rotate90({ data, width, height }) {
 }
 
 function negate({ data, width, height }) {
+    const out = new Uint8Array(data.length);
     for (let i = 0; i < data.length; i += 4) {
-        data[i] = 255 - data[i];
-        data[i + 1] = 255 - data[i + 1];
-        data[i + 2] = 255 - data[i + 2];
+        out[i] = 255 - data[i];
+        out[i + 1] = 255 - data[i + 1];
+        out[i + 2] = 255 - data[i + 2];
+        out[i + 3] = data[i + 3];
     }
-    return { data, width, height };
+    return { data: out, width, height };
 }
 
 function normalize({ data, width, height }) {
@@ -254,21 +258,25 @@ function normalize({ data, width, height }) {
         }
     }
     const range = max - min || 1;
+    const out = new Uint8Array(data.length);
     for (let i = 0; i < data.length; i += 4) {
-        data[i] = Math.round(((data[i] - min) / range) * 255);
-        data[i + 1] = Math.round(((data[i + 1] - min) / range) * 255);
-        data[i + 2] = Math.round(((data[i + 2] - min) / range) * 255);
+        out[i] = Math.round(((data[i] - min) / range) * 255);
+        out[i + 1] = Math.round(((data[i + 1] - min) / range) * 255);
+        out[i + 2] = Math.round(((data[i + 2] - min) / range) * 255);
+        out[i + 3] = data[i + 3];
     }
-    return { data, width, height };
+    return { data: out, width, height };
 }
 
 function tint({ data, width, height }, [r, g, b]) {
+    const out = new Uint8Array(data.length);
     for (let i = 0; i < data.length; i += 4) {
-        data[i] = Math.round((data[i] * r) / 255);
-        data[i + 1] = Math.round((data[i + 1] * g) / 255);
-        data[i + 2] = Math.round((data[i + 2] * b) / 255);
+        out[i] = Math.round((data[i] * r) / 255);
+        out[i + 1] = Math.round((data[i + 1] * g) / 255);
+        out[i + 2] = Math.round((data[i + 2] * b) / 255);
+        out[i + 3] = data[i + 3];
     }
-    return { data, width, height };
+    return { data: out, width, height };
 }
 
 /** box blur - separable */
@@ -419,73 +427,69 @@ function extend({ data, width, height }, { top = 0, bottom = 0, left = 0, right 
 }
 
 /** trim background borders */
-function trim({ data, width, height }, { threshold = 10, background } = {}) {
+/**
+ * Finds the tightest rectangle enclosing non-background content.
+ * Returns { left, top, right, bottom } (inclusive) or null if the whole
+ * image matches the background (nothing to keep).
+ */
+function findContentBounds({ data, width, height }, { threshold = 10, background } = {}) {
     if (!background) {
         background = [data[0], data[1], data[2], data[3]];
     }
-    let top = 0, bottom = height - 1, left = 0, right = width - 1;
     const matchesBg = (i) => {
         return Math.abs(data[i] - background[0]) <= threshold &&
                Math.abs(data[i + 1] - background[1]) <= threshold &&
                Math.abs(data[i + 2] - background[2]) <= threshold &&
                Math.abs(data[i + 3] - background[3]) <= threshold;
     };
-    
+
+    let top = 0, bottom = height - 1, left = 0, right = width - 1;
     let found = false;
+
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-            if (!matchesBg((y * width + x) * 4)) {
-                top = y;
-                found = true;
-                break;
-            }
+            if (!matchesBg((y * width + x) * 4)) { top = y; found = true; break; }
         }
         if (found) break;
     }
-    if (!found) return { data: new Uint8Array(0), width: 0, height: 0 };
-    
+    if (!found) return null;
+
     found = false;
     for (let y = height - 1; y >= 0; y--) {
         for (let x = 0; x < width; x++) {
-            if (!matchesBg((y * width + x) * 4)) {
-                bottom = y;
-                found = true;
-                break;
-            }
+            if (!matchesBg((y * width + x) * 4)) { bottom = y; found = true; break; }
         }
         if (found) break;
     }
-    
+
     found = false;
     for (let x = 0; x < width; x++) {
         for (let y = 0; y < height; y++) {
-            if (!matchesBg((y * width + x) * 4)) {
-                left = x;
-                found = true;
-                break;
-            }
+            if (!matchesBg((y * width + x) * 4)) { left = x; found = true; break; }
         }
         if (found) break;
     }
-    
+
     found = false;
     for (let x = width - 1; x >= 0; x--) {
         for (let y = 0; y < height; y++) {
-            if (!matchesBg((y * width + x) * 4)) {
-                right = x;
-                found = true;
-                break;
-            }
+            if (!matchesBg((y * width + x) * 4)) { right = x; found = true; break; }
         }
         if (found) break;
     }
-    
-    return crop({ data, width, height }, left, top, right - left + 1, bottom - top + 1);
+
+    return { left, top, right, bottom };
 }
 
-/** overlay with proper alpha blending. Mutates base.data in place. */
+function trim({ data, width, height }, opts = {}) {
+    const box = findContentBounds({ data, width, height }, opts);
+    if (!box) return { data: new Uint8Array(0), width: 0, height: 0 };
+    return crop({ data, width, height }, box.left, box.top, box.right - box.left + 1, box.bottom - box.top + 1);
+}
+
+/** overlay with proper alpha blending. */
 function composite(base, overlayImg, { left = 0, top = 0 } = {}) {
-    const out = base.data;
+    const out = new Uint8Array(base.data);
     for (let row = 0; row < overlayImg.height; row++) {
         const dstRow = row + top;
         if (dstRow < 0 || dstRow >= base.height) continue;
@@ -525,10 +529,11 @@ function ensureAlpha({ data, width, height }) {
 }
 
 function removeAlpha({ data, width, height }) {
-    for (let i = 3; i < data.length; i += 4) {
-        data[i] = 255;
+    const out = new Uint8Array(data);
+    for (let i = 3; i < out.length; i += 4) {
+        out[i] = 255;
     }
-    return { data, width, height };
+    return { data: out, width, height };
 }
 
 function detectAlphaUsage({ data }) {
@@ -558,5 +563,5 @@ export {
     crop, resizeBilinear, resizeSmooth, resizeCover, resizeContain,
     grayscale, flip, flop, rotate90,
     negate, normalize, tint, blur, sharpen, extend, trim, composite,
-    ensureAlpha, removeAlpha, detectAlphaUsage, computeStats
+    ensureAlpha, removeAlpha, detectAlphaUsage, computeStats, findContentBounds
 };
