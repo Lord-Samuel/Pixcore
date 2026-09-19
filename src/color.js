@@ -77,11 +77,12 @@ function parseColor(input) {
     // RGB/RGBA
     const rgbMatch = str.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/)
     if (rgbMatch) {
+        const clamp255 = (v) => Math.max(0, Math.min(255, Math.round(parseFloat(v))))
         return {
-            r: Math.round(parseFloat(rgbMatch[1])),
-            g: Math.round(parseFloat(rgbMatch[2])),
-            b: Math.round(parseFloat(rgbMatch[3])),
-            a: rgbMatch[4] !== undefined ? parseFloat(rgbMatch[4]) : 1
+            r: clamp255(rgbMatch[1]),
+            g: clamp255(rgbMatch[2]),
+            b: clamp255(rgbMatch[3]),
+            a: rgbMatch[4] !== undefined ? Math.max(0, Math.min(1, parseFloat(rgbMatch[4]))) : 1
         }
     }
 
