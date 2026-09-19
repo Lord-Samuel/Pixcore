@@ -2,6 +2,7 @@ import { PNG } from 'pngjs'
 import jpeg from 'jpeg-js'
 import { createRequire } from 'module'
 import { readFileSync } from 'fs'
+import { buildAnimatedWebpContainer } from './animated.js'
 
 const require = createRequire(import.meta.url)
 
@@ -58,4 +59,35 @@ async function toWebp({ data, width, height }, quality = 80) {
     return Buffer.from(encoded)
 }
 
-export { toJpeg, toPng, toWebp }
+/**
+ * Encode a sequence of full-canvas RGBA frames as an animated WebP.
+ * `frames`: array of { data, width, height, duration }. All frames must
+ */
+async function toAnimatedWebp(frames, { quality = 80, loop = 0, background = [0, 0, 0, 0] } = {}) {
+    await initWebPEncoder()
+
+    if (!webpEncodeFn) {
+        throw new Error('Animated WebP encoding requires "@jsquash/webp" to be installed')
+    }
+    if (!frames.length) throw new Error('toAnimatedWebp: no frames provided')
+
+    const { width, height } = frames[0]
+    const encodedFrames = []
+
+    for (const frame of frames) {
+        if (frame.width !== width || frame.height !== height) {
+            throw new Error('toAnimatedWebp: all frames must share the same dimensions (resize them to match first)')
+        }
+        const imageData = {
+            data: ArrayBuffer.isView(frame.data) ? frame.data : Buffer.from(frame.data),
+            width: frame.width,
+            height: frame.height
+        }
+        const encoded = await webpEncodeFn(imageData, { quality })
+        encodedFrames.push({ webpBuffer: Buffer.from(encoded), duration: frame.duration ?? 100 })
+    }
+
+    return buildAnimatedWebpContainer(encodedFrames, { width, height, loop, background })
+}
+
+export { toJpeg, toPng, toWebp, toAnimatedWebp }
