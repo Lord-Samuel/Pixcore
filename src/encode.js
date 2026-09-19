@@ -1,10 +1,6 @@
 import { PNG } from 'pngjs'
 import jpeg from 'jpeg-js'
-import { createRequire } from 'module'
-import { readFileSync } from 'fs'
 import { buildAnimatedWebpContainer } from './animated.js'
-
-const require = createRequire(import.meta.url)
 
 let webpEncodeFn;
 let webpInitialized = false;
@@ -15,15 +11,7 @@ async function initWebPEncoder() {
     try {
         const mod = await import('@jsquash/webp/encode.js')
         webpEncodeFn = mod.default
-        
-        const wasmPath = require.resolve('@jsquash/webp/codec/enc/webp_enc.wasm')
-        const wasmBuffer = readFileSync(wasmPath)
-        const wasmModule = new WebAssembly.Module(wasmBuffer)
-        
-        if (mod.init) {
-            await mod.init(wasmModule)
-            webpInitialized = true
-        }
+        webpInitialized = true
     }
     catch (e) {
         console.error('Failed to init WebP encoder:', e.message)
@@ -62,6 +50,7 @@ async function toWebp({ data, width, height }, quality = 80) {
 /**
  * Encode a sequence of full-canvas RGBA frames as an animated WebP.
  * `frames`: array of { data, width, height, duration }. All frames must
+ * share the same width/height — resize them to match before calling this.
  */
 async function toAnimatedWebp(frames, { quality = 80, loop = 0, background = [0, 0, 0, 0] } = {}) {
     await initWebPEncoder()
