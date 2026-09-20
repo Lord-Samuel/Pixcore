@@ -1,19 +1,63 @@
 import { PNG } from 'pngjs'
 import jpeg from 'jpeg-js'
+import { createRequire } from 'module'
+import { readFileSync } from 'fs'
 import { buildAnimatedWebpContainer } from './animated.js'
+
+const require = createRequire(import.meta.url)
 
 let webpEncodeFn;
 let webpInitialized = false;
 
+// Same byte sequence @jsquash/webp validates internally to pick its SIMD
+// or non-SIMD encoder. If we pass the wrong wasm, the encoder falls through
+// to fetching its own — which Node's fetch rejects for file:// URLs.
+function detectSimd() {
+    try {
+        return WebAssembly.validate(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            1, 5, 1, 96, 0, 1, 123,
+            3, 2, 1, 0,
+            10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+        ]))
+    } catch {
+        return false
+    }
+}
+
 async function initWebPEncoder() {
     if (webpInitialized) return;
-    
+
     try {
         const mod = await import('@jsquash/webp/encode.js')
         webpEncodeFn = mod.default
+
+        const simd = detectSimd()
+        const candidates = simd
+            ? ['webp_enc_simd.wasm', 'webp_enc.wasm']
+            : ['webp_enc.wasm']
+
+        let wasmBuffer = null
+        for (const file of candidates) {
+            try {
+                wasmBuffer = readFileSync(
+                    require.resolve(`@jsquash/webp/codec/enc/${file}`)
+                )
+                break
+            } catch {}
+        }
+
+        if (!wasmBuffer) {
+            throw new Error('no encoder wasm found in @jsquash/webp/codec/enc')
+        }
+
+        const wasmModule = new WebAssembly.Module(wasmBuffer)
+
+        if (mod.init) {
+            await mod.init(wasmModule)
+        }
         webpInitialized = true
-    }
-    catch (e) {
+    } catch (e) {
         console.error('Failed to init WebP encoder:', e.message)
         webpEncodeFn = null
     }
